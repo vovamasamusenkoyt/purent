@@ -1,44 +1,54 @@
 //! 16550 UART Serial driver on COM1 (0x3F8)
+//! Fully safe type abstraction over hardware port I/O
 
 use core::fmt;
-use crate::cpu::{inb, outb};
+use crate::port::Port;
 
 pub const COM1_BASE: u16 = 0x3F8;
 
 pub struct SerialPort {
-    base: u16,
+    data: Port<u8>,
+    ier: Port<u8>,
+    fcr: Port<u8>,
+    lcr: Port<u8>,
+    mcr: Port<u8>,
+    lsr: Port<u8>,
 }
+
+unsafe impl Send for SerialPort {}
+unsafe impl Sync for SerialPort {}
 
 impl SerialPort {
     pub const fn new(base: u16) -> Self {
-        Self { base }
+        Self {
+            data: Port::new(base),
+            ier: Port::new(base + 1),
+            fcr: Port::new(base + 2),
+            lcr: Port::new(base + 3),
+            mcr: Port::new(base + 4),
+            lsr: Port::new(base + 5),
+        }
     }
 
-    pub unsafe fn init(&self) {
-        outb(self.base + 1, 0x00); // Disable interrupts
-        outb(self.base + 3, 0x80); // Enable DLAB (set baud rate divisor)
-        outb(self.base + 0, 0x01); // Set divisor to 1 (115200 baud) - low byte
-        outb(self.base + 1, 0x00); // high byte
-        outb(self.base + 3, 0x03); // 8 bits, no parity, one stop bit
-        outb(self.base + 2, 0xC7); // Enable FIFO, clear them, with 14-byte threshold
-        outb(self.base + 4, 0x0B); // IRQs enabled, RTS/DSR set
-    }
-
-    fn line_status(&self) -> u8 {
-        unsafe { inb(self.base + 5) }
+    pub fn init(&self) {
+        self.ier.write(0x00); // Disable interrupts
+        self.lcr.write(0x80); // Enable DLAB (set baud rate divisor)
+        self.data.write(0x01); // Set divisor to 1 (115200 baud) - low byte
+        self.ier.write(0x00); // high byte
+        self.lcr.write(0x03); // 8 bits, no parity, one stop bit
+        self.fcr.write(0xC7); // Enable FIFO, clear them, with 14-byte threshold
+        self.mcr.write(0x0B); // IRQs enabled, RTS/DSR set
     }
 
     pub fn is_transmit_empty(&self) -> bool {
-        (self.line_status() & 0x20) != 0
+        (self.lsr.read() & 0x20) != 0
     }
 
     pub fn write_byte(&self, byte: u8) {
         while !self.is_transmit_empty() {
             core::hint::spin_loop();
         }
-        unsafe {
-            outb(self.base, byte);
-        }
+        self.data.write(byte);
     }
 
     pub fn write_str(&self, s: &str) {

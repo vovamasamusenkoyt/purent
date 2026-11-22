@@ -105,12 +105,23 @@ impl ObjectDirectory {
     }
 }
 
-// Fixed root namespaces
-static mut ROOT_DIR: ObjectDirectory = ObjectDirectory::new();
-static mut DEVICE_DIR: ObjectDirectory = ObjectDirectory::new();
-static mut DRIVER_DIR: ObjectDirectory = ObjectDirectory::new();
-static mut DOS_DEVICES_DIR: ObjectDirectory = ObjectDirectory::new();
-static mut FILE_SYSTEM_DIR: ObjectDirectory = ObjectDirectory::new();
+pub struct ObjectNamespace {
+    pub root_dir: ObjectDirectory,
+    pub device_dir: ObjectDirectory,
+    pub driver_dir: ObjectDirectory,
+    pub dos_devices_dir: ObjectDirectory,
+    pub file_system_dir: ObjectDirectory,
+}
+
+unsafe impl Send for ObjectNamespace {}
+
+pub static OB_NAMESPACE: purent_hal::SpinLock<ObjectNamespace> = purent_hal::SpinLock::new(ObjectNamespace {
+    root_dir: ObjectDirectory::new(),
+    device_dir: ObjectDirectory::new(),
+    driver_dir: ObjectDirectory::new(),
+    dos_devices_dir: ObjectDirectory::new(),
+    file_system_dir: ObjectDirectory::new(),
+});
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -119,22 +130,33 @@ pub struct HandleEntry {
     pub granted_access: AccessMask,
 }
 
-static mut SYSTEM_HANDLE_TABLE: [HandleEntry; 128] = [HandleEntry {
-    object: core::ptr::null_mut(),
-    granted_access: 0,
-}; 128];
-static mut NEXT_HANDLE: usize = 4; // NT Handles start at 4 (multiples of 4)
+pub struct HandleTable {
+    pub next_handle: usize,
+    pub entries: [HandleEntry; 128],
+}
+
+unsafe impl Send for HandleTable {}
+
+pub static SYSTEM_HANDLE_TABLE: purent_hal::SpinLock<HandleTable> = purent_hal::SpinLock::new(HandleTable {
+    next_handle: 4,
+    entries: [HandleEntry {
+        object: core::ptr::null_mut(),
+        granted_access: 0,
+    }; 128],
+});
 
 pub unsafe fn ob_init() {
+    let mut ns = OB_NAMESPACE.lock();
+
     // 1. Create root directory header
-    let root_header = create_header(&raw mut ROOT_DIR as *mut u8, "\\", &raw mut OB_TYPE_DIRECTORY);
+    let root_header = create_header(&raw mut ns.root_dir as *mut u8, "\\", &raw mut OB_TYPE_DIRECTORY);
     (*root_header).parent_directory = core::ptr::null_mut();
 
     // 2. Insert standard subdirectories into root
-    insert_directory_entry(&raw mut ROOT_DIR, &raw mut DEVICE_DIR, "Device");
-    insert_directory_entry(&raw mut ROOT_DIR, &raw mut DRIVER_DIR, "Driver");
-    insert_directory_entry(&raw mut ROOT_DIR, &raw mut DOS_DEVICES_DIR, "DosDevices");
-    insert_directory_entry(&raw mut ROOT_DIR, &raw mut FILE_SYSTEM_DIR, "FileSystem");
+    insert_directory_entry(&raw mut ns.root_dir, &raw mut ns.device_dir, "Device");
+    insert_directory_entry(&raw mut ns.root_dir, &raw mut ns.driver_dir, "Driver");
+    insert_directory_entry(&raw mut ns.root_dir, &raw mut ns.dos_devices_dir, "DosDevices");
+    insert_directory_entry(&raw mut ns.root_dir, &raw mut ns.file_system_dir, "FileSystem");
 
     kprintln!("[OB] Object Manager namespace initialized (Root: \\, \\Device, \\Driver, \\DosDevices, \\FileSystem)");
 }
@@ -165,9 +187,10 @@ unsafe fn insert_directory_entry(parent: *mut ObjectDirectory, child_dir: *mut O
 }
 
 pub unsafe fn ob_insert_device(device_ptr: *mut u8, name: &str) -> NtStatus {
+    let mut ns = OB_NAMESPACE.lock();
     let header = create_header(device_ptr, name, &raw mut OB_TYPE_DEVICE);
-    (*header).parent_directory = &raw mut DEVICE_DIR;
-    let status = DEVICE_DIR.insert(header);
+    (*header).parent_directory = &raw mut ns.device_dir;
+    let status = ns.device_dir.insert(header);
     if status == STATUS_SUCCESS {
         kprintln!("[OB] Registered object in namespace: \\Device\\{}", name);
     }
@@ -175,9 +198,10 @@ pub unsafe fn ob_insert_device(device_ptr: *mut u8, name: &str) -> NtStatus {
 }
 
 pub unsafe fn ob_insert_filesystem(device_ptr: *mut u8, name: &str) -> NtStatus {
+    let mut ns = OB_NAMESPACE.lock();
     let header = create_header(device_ptr, name, &raw mut OB_TYPE_DEVICE);
-    (*header).parent_directory = &raw mut FILE_SYSTEM_DIR;
-    let status = FILE_SYSTEM_DIR.insert(header);
+    (*header).parent_directory = &raw mut ns.file_system_dir;
+    let status = ns.file_system_dir.insert(header);
     if status == STATUS_SUCCESS {
         kprintln!("[OB] Registered object in namespace: \\FileSystem\\{}", name);
     }
@@ -191,10 +215,11 @@ pub unsafe fn ob_insert_file(file_ptr: *mut u8, name: &str) -> *mut ObjectHeader
 
 pub unsafe fn ob_close_handle(handle: usize) -> NtStatus {
     let handle_idx = handle / 4;
-    if handle_idx == 0 || handle_idx >= SYSTEM_HANDLE_TABLE.len() {
+    let mut tbl = SYSTEM_HANDLE_TABLE.lock();
+    if handle_idx == 0 || handle_idx >= tbl.entries.len() {
         return purent_ntdef::status::STATUS_INVALID_HANDLE;
     }
-    let entry = &mut SYSTEM_HANDLE_TABLE[handle_idx];
+    let entry = &mut tbl.entries[handle_idx];
     if entry.object.is_null() {
         return purent_ntdef::status::STATUS_INVALID_HANDLE;
     }
@@ -211,11 +236,12 @@ pub unsafe fn ob_close_handle(handle: usize) -> NtStatus {
 }
 
 pub unsafe fn ob_create_handle(object_header: *mut ObjectHeader, access: AccessMask) -> usize {
-    let handle_idx = NEXT_HANDLE / 4;
-    NEXT_HANDLE += 4;
+    let mut tbl = SYSTEM_HANDLE_TABLE.lock();
+    let handle_idx = tbl.next_handle / 4;
+    tbl.next_handle += 4;
 
-    SYSTEM_HANDLE_TABLE[handle_idx].object = object_header;
-    SYSTEM_HANDLE_TABLE[handle_idx].granted_access = access;
+    tbl.entries[handle_idx].object = object_header;
+    tbl.entries[handle_idx].granted_access = access;
     (*object_header).handle_count += 1;
 
     let handle_val = handle_idx * 4;
@@ -224,15 +250,16 @@ pub unsafe fn ob_create_handle(object_header: *mut ObjectHeader, access: AccessM
 }
 
 pub unsafe fn ob_reference_object_by_name(path: &str) -> Result<*mut ObjectHeader, NtStatus> {
+    let ns = OB_NAMESPACE.lock();
     if path.starts_with("\\Device\\") {
         let dev_name = &path["\\Device\\".len()..];
-        if let Some(hdr) = DEVICE_DIR.lookup(dev_name) {
+        if let Some(hdr) = ns.device_dir.lookup(dev_name) {
             (*hdr).pointer_count += 1;
             return Ok(hdr);
         }
     } else if path.starts_with("\\FileSystem\\") {
         let fs_name = &path["\\FileSystem\\".len()..];
-        if let Some(hdr) = FILE_SYSTEM_DIR.lookup(fs_name) {
+        if let Some(hdr) = ns.file_system_dir.lookup(fs_name) {
             (*hdr).pointer_count += 1;
             return Ok(hdr);
         }
@@ -242,10 +269,11 @@ pub unsafe fn ob_reference_object_by_name(path: &str) -> Result<*mut ObjectHeade
 
 pub unsafe fn ob_reference_object_by_handle(handle: usize) -> Result<*mut ObjectHeader, NtStatus> {
     let handle_idx = handle / 4;
-    if handle_idx == 0 || handle_idx >= SYSTEM_HANDLE_TABLE.len() {
+    let tbl = SYSTEM_HANDLE_TABLE.lock();
+    if handle_idx == 0 || handle_idx >= tbl.entries.len() {
         return Err(STATUS_OBJECT_NAME_NOT_FOUND);
     }
-    let entry = &SYSTEM_HANDLE_TABLE[handle_idx];
+    let entry = &tbl.entries[handle_idx];
     if entry.object.is_null() {
         return Err(STATUS_OBJECT_NAME_NOT_FOUND);
     }

@@ -39,9 +39,19 @@ pub static mut BOOT_THREAD: KThread = KThread {
     padding_3: [0; 0x200],
 };
 
-static mut READY_THREADS: [*mut KThread; MAX_READY_THREADS] = [core::ptr::null_mut(); MAX_READY_THREADS];
-static mut READY_COUNT: usize = 0;
-static mut CURRENT_INDEX: usize = 0;
+pub struct SchedulerQueue {
+    pub ready_threads: [*mut KThread; MAX_READY_THREADS],
+    pub ready_count: usize,
+    pub current_index: usize,
+}
+
+unsafe impl Send for SchedulerQueue {}
+
+pub static SCHED_QUEUE: purent_hal::SpinLock<SchedulerQueue> = purent_hal::SpinLock::new(SchedulerQueue {
+    ready_threads: [core::ptr::null_mut(); MAX_READY_THREADS],
+    ready_count: 0,
+    current_index: 0,
+});
 
 #[unsafe(naked)]
 unsafe extern "win64" fn ki_thread_start_trampoline() {
@@ -159,9 +169,12 @@ pub unsafe fn sched_init() {
     BOOT_THREAD.state = ThreadState::Running as u8;
     BOOT_THREAD.quantum = DEFAULT_QUANTUM;
 
-    READY_THREADS[0] = &raw mut BOOT_THREAD;
-    READY_COUNT = 1;
-    CURRENT_INDEX = 0;
+    {
+        let mut q = SCHED_QUEUE.lock();
+        q.ready_threads[0] = &raw mut BOOT_THREAD;
+        q.ready_count = 1;
+        q.current_index = 0;
+    }
 
     kprintln!("[KE] Preemptive Scheduler online (Initial Process PID: 4, Boot Thread: 0x{:p})", &raw const BOOT_THREAD);
 }
@@ -171,10 +184,6 @@ pub unsafe fn ps_create_system_thread(
     context: *mut core::ffi::c_void,
     name: &'static str,
 ) -> Result<*mut KThread, NtStatus> {
-    if READY_COUNT >= MAX_READY_THREADS {
-        return Err(STATUS_NO_MEMORY);
-    }
-
     // 1. Allocate 16 KiB NonPaged pool buffer for the kernel stack
     let stack_buf = ExAllocatePoolWithTag(NonPagedPool, KERNEL_STACK_SIZE, STACK_TAG);
     if stack_buf.is_null() {
@@ -199,26 +208,28 @@ pub unsafe fn ps_create_system_thread(
     (*thread_ptr).quantum = DEFAULT_QUANTUM;
 
     // 3. Format initial stack frame for KiSwapContext
-    // Top of stack - 8: Return Address (ki_thread_start_trampoline)
     let ret_addr_slot = (stack_top - 8) as *mut usize;
     *ret_addr_slot = ki_thread_start_trampoline as *const () as usize;
 
-    // Below return address is the 0x138 stack frame saved by KiSwapContext
     let frame_base = stack_top - 8 - 0x138;
     (*thread_ptr).kernel_stack = frame_base as *mut core::ffi::c_void;
 
-    // Seed saved registers:
-    // RBX (offset 0x100): entry routine address
     let rbx_slot = (frame_base + 0x100) as *mut usize;
     *rbx_slot = routine as *const () as usize;
 
-    // RDI (offset 0x108): context parameter
     let rdi_slot = (frame_base + 0x108) as *mut usize;
     *rdi_slot = context as usize;
 
-    // 4. Register thread into ready queue
-    READY_THREADS[READY_COUNT] = thread_ptr;
-    READY_COUNT += 1;
+    // 4. Register thread into ready queue safely
+    {
+        let mut q = SCHED_QUEUE.lock();
+        if q.ready_count >= MAX_READY_THREADS {
+            return Err(STATUS_NO_MEMORY);
+        }
+        let idx = q.ready_count;
+        q.ready_threads[idx] = thread_ptr;
+        q.ready_count += 1;
+    }
 
     kprintln!(
         "[PS] Created System Thread \"{}\" (KTHREAD: 0x{:p}, KernelStack: 0x{:016X})",
@@ -232,41 +243,55 @@ pub unsafe fn ps_create_system_thread(
 
 /// Called periodically on APIC timer interrupt
 pub unsafe fn ki_quantum_end() {
-    if READY_COUNT <= 1 {
-        return;
-    }
+    let (curr_thread, next_thread) = {
+        let mut q = match SCHED_QUEUE.try_lock() {
+            Some(g) => g,
+            None => return,
+        };
 
-    let curr_thread = READY_THREADS[CURRENT_INDEX];
-    if curr_thread.is_null() {
-        return;
-    }
-
-    (*curr_thread).quantum -= 1;
-    if (*curr_thread).quantum <= 0 {
-        (*curr_thread).quantum = DEFAULT_QUANTUM;
-
-        // Round-robin selection of next ready thread
-        let next_idx = (CURRENT_INDEX + 1) % READY_COUNT;
-        let next_thread = READY_THREADS[next_idx];
-        if next_thread != curr_thread {
-            CURRENT_INDEX = next_idx;
-            KiSwapContext(curr_thread, next_thread);
+        if q.ready_count <= 1 {
+            return;
         }
-    }
+
+        let curr = q.ready_threads[q.current_index];
+        if curr.is_null() {
+            return;
+        }
+
+        (*curr).quantum -= 1;
+        if (*curr).quantum > 0 {
+            return;
+        }
+        (*curr).quantum = DEFAULT_QUANTUM;
+
+        let next_idx = (q.current_index + 1) % q.ready_count;
+        let next = q.ready_threads[next_idx];
+        if next == curr {
+            return;
+        }
+        q.current_index = next_idx;
+        (curr, next)
+    };
+
+    KiSwapContext(curr_thread, next_thread);
 }
 
 /// Voluntary yield to the next runnable thread
 pub unsafe fn ki_yield() {
-    if READY_COUNT <= 1 {
-        return;
-    }
+    let (curr_thread, next_thread) = {
+        let mut q = SCHED_QUEUE.lock();
+        if q.ready_count <= 1 {
+            return;
+        }
+        let curr = q.ready_threads[q.current_index];
+        let next_idx = (q.current_index + 1) % q.ready_count;
+        let next = q.ready_threads[next_idx];
+        if next == curr {
+            return;
+        }
+        q.current_index = next_idx;
+        (curr, next)
+    };
 
-    let curr_thread = READY_THREADS[CURRENT_INDEX];
-    let next_idx = (CURRENT_INDEX + 1) % READY_COUNT;
-    let next_thread = READY_THREADS[next_idx];
-
-    if next_thread != curr_thread {
-        CURRENT_INDEX = next_idx;
-        KiSwapContext(curr_thread, next_thread);
-    }
+    KiSwapContext(curr_thread, next_thread);
 }

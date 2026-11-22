@@ -25,12 +25,14 @@ pub struct PhysicalMemoryManager {
     bitmap_words: usize,
 }
 
-static mut PMM: PhysicalMemoryManager = PhysicalMemoryManager {
+unsafe impl Send for PhysicalMemoryManager {}
+
+pub static PMM: purent_hal::SpinLock<PhysicalMemoryManager> = purent_hal::SpinLock::new(PhysicalMemoryManager {
     total_pages: 0,
     free_pages: 0,
     bitmap_ptr: core::ptr::null_mut(),
     bitmap_words: 0,
-};
+});
 
 // Static storage for PMM frame tracking (up to 4GB of physical RAM = 1,048,576 pages = 16,384 u64 words = 128 KiB)
 #[repr(align(4096))]
@@ -122,8 +124,10 @@ impl PhysicalMemoryManager {
     }
 }
 
-pub unsafe fn pmm_init(ldr: &PureNtLoaderBlock) {
-    PMM.init(ldr);
+pub fn pmm_init(ldr: &PureNtLoaderBlock) {
+    unsafe {
+        PMM.lock().init(ldr);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -142,23 +146,26 @@ pub struct NonPagedPool {
     heap_end: usize,
 }
 
-static mut KERNEL_POOL: NonPagedPool = NonPagedPool {
+unsafe impl Send for NonPagedPool {}
+
+pub static KERNEL_POOL: purent_hal::SpinLock<NonPagedPool> = purent_hal::SpinLock::new(NonPagedPool {
     heap_curr: 0,
     heap_end: 0,
-};
+});
 
 impl NonPagedPool {
     pub unsafe fn init(&mut self) {
         // Allocate initial 1MB virtual heap window from physical memory
         // In PureNT, 0xFFFFF80000000000 + phys is mapped 1:1 in higher-half
-        if let Some(phys) = PMM.allocate_frame() {
+        let mut pmm = PMM.lock();
+        if let Some(phys) = pmm.allocate_frame() {
             let virt = 0xFFFFF80000000000usize + (phys as usize);
             self.heap_curr = virt;
             self.heap_end = virt + PAGE_SIZE;
 
             // Pre-allocate 31 more pages (total 128 KiB heap buffer)
             for _ in 0..31 {
-                if let Some(p) = PMM.allocate_frame() {
+                if let Some(p) = pmm.allocate_frame() {
                     let v = 0xFFFFF80000000000usize + (p as usize);
                     if v == self.heap_end {
                         self.heap_end += PAGE_SIZE;
@@ -181,7 +188,8 @@ impl NonPagedPool {
 
         while self.heap_curr + total_size > self.heap_end {
             // Expand heap with a new physical page
-            if let Some(phys) = PMM.allocate_frame() {
+            let mut pmm = PMM.lock();
+            if let Some(phys) = pmm.allocate_frame() {
                 let virt = 0xFFFFF80000000000usize + (phys as usize);
                 if self.heap_end == 0 || virt == self.heap_end {
                     self.heap_end += PAGE_SIZE;
@@ -206,8 +214,10 @@ impl NonPagedPool {
     }
 }
 
-pub unsafe fn pool_init() {
-    KERNEL_POOL.init();
+pub fn pool_init() {
+    unsafe {
+        KERNEL_POOL.lock().init();
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -227,7 +237,7 @@ pub unsafe extern "win64" fn ExAllocatePoolWithTag(
     number_of_bytes: usize,
     tag: u32,
 ) -> *mut core::ffi::c_void {
-    let ptr = KERNEL_POOL.allocate(number_of_bytes, tag);
+    let ptr = KERNEL_POOL.lock().allocate(number_of_bytes, tag);
     ptr as *mut core::ffi::c_void
 }
 
