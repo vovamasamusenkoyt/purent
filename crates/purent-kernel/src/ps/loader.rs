@@ -54,13 +54,27 @@ pub unsafe fn ps_create_user_process(
         entry_point
     );
 
+    let cr3 = purent_hal::cpu::read_cr3();
+
     // 1. Copy PE headers and map sections into user space at image_base
     let num_sections = pe.section_headers().len();
-    kprintln!("[PS] Mapping {} PE sections into user memory space...", num_sections);
+    kprintln!("[PS] Mapping {} PE sections into user memory space via VMM 4KB paging...", num_sections);
 
-    // Copy DOS + NT headers
+    // Map and copy PE headers
     let opt_hdr = &pe.nt_headers().optional_header;
     let headers_size = opt_hdr.size_of_headers as usize;
+    let headers_pages = (headers_size + 4095) / 4096;
+    for i in 0..headers_pages {
+        let va = (image_base + i * 4096) as u64;
+        let frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+        core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(frame), 0, 4096);
+        crate::nt::mm::vmm_map_user_page(
+            cr3,
+            va,
+            frame,
+            crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE,
+        )?;
+    }
     if headers_size <= pe_bytes.len() {
         core::ptr::copy_nonoverlapping(pe_bytes.as_ptr(), image_base as *mut u8, headers_size);
     }
@@ -73,27 +87,48 @@ pub unsafe fn ps_create_user_process(
         let raw_size = sec.size_of_raw_data as usize;
         let virt_addr = sec.virtual_address as usize;
         let virt_size = sec.virtual_size as usize;
+        let sec_va = image_base + virt_addr;
 
-        let dst = (image_base + virt_addr) as *mut u8;
+        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
+        let sec_pages = page_aligned_size / 4096;
+        for j in 0..sec_pages {
+            let va = (sec_va + j * 4096) as u64;
+            let frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+            core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(frame), 0, 4096);
+            crate::nt::mm::vmm_map_user_page(
+                cr3,
+                va,
+                frame,
+                crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE,
+            )?;
+        }
+
+        let dst = sec_va as *mut u8;
         if raw_size > 0 && raw_offset + raw_size <= pe_bytes.len() {
             core::ptr::copy_nonoverlapping(pe_bytes.as_ptr().add(raw_offset), dst, raw_size);
         }
-        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
         if virt_size < page_aligned_size {
             core::ptr::write_bytes(dst.add(virt_size), 0, page_aligned_size - virt_size);
         }
+
         let chars = sec.characteristics;
-        let protect_str = if chars & 0x20000000 != 0 {
-            "PAGE_EXECUTE_READ (RX)"
+        let (protect_str, pte_flags) = if chars & 0x20000000 != 0 {
+            ("PAGE_EXECUTE_READ (RX)", crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER)
         } else if chars & 0x80000000 != 0 {
-            "PAGE_READWRITE (RW+NX)"
+            ("PAGE_READWRITE (RW+NX)", crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX)
         } else {
-            "PAGE_READONLY (RO+NX)"
+            ("PAGE_READONLY (RO+NX)", crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_NX)
         };
+
+        for j in 0..sec_pages {
+            let va = (sec_va + j * 4096) as u64;
+            let _ = crate::nt::mm::vmm_protect_user_page(cr3, va, pte_flags);
+        }
+
         kprintln!(
             "[PS] Mapped section {:<8} -> 0x{:016X} (raw: {} bytes, virt: {} bytes, tail-zeroed) [{}]",
             sec_name.trim_end_matches('\0'),
-            image_base + virt_addr,
+            sec_va,
             raw_size,
             virt_size,
             protect_str
@@ -109,7 +144,14 @@ pub unsafe fn ps_create_user_process(
 
     // 2. Allocate and format Process Environment Block (PEB) at 0x0000000000450000
     let peb_addr = 0x0000000000450000usize;
-    core::ptr::write_bytes(peb_addr as *mut u8, 0, 4096);
+    let peb_frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+    core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(peb_frame), 0, 4096);
+    crate::nt::mm::vmm_map_user_page(
+        cr3,
+        peb_addr as u64,
+        peb_frame,
+        crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX,
+    )?;
     let peb = peb_addr as *mut Peb;
 
     (*peb).inherited_address_space = 0;
@@ -139,11 +181,31 @@ pub unsafe fn ps_create_user_process(
 
     // 3. Allocate and format Thread Environment Block (TEB) at 0x0000000000460000
     let teb_addr = 0x0000000000460000usize;
-    core::ptr::write_bytes(teb_addr as *mut u8, 0, 4096);
+    let teb_frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+    core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(teb_frame), 0, 4096);
+    crate::nt::mm::vmm_map_user_page(
+        cr3,
+        teb_addr as u64,
+        teb_frame,
+        crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX,
+    )?;
     let teb = teb_addr as *mut Teb;
 
     let user_stack_base = 0x0000000000470000usize;
     let user_stack_top = (0x0000000000480000usize - 0x80) & !0xFu64 as usize; // 16-byte aligned
+
+    // Map 64 KiB (16 pages) for user stack
+    for s in 0..16 {
+        let va = (user_stack_base + s * 4096) as u64;
+        let frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+        core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(frame), 0, 4096);
+        crate::nt::mm::vmm_map_user_page(
+            cr3,
+            va,
+            frame,
+            crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX,
+        )?;
+    }
 
     let tid = pid + 4;
     (*teb).nt_tib.stack_base = user_stack_top as *mut core::ffi::c_void;

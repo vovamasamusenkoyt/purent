@@ -11,18 +11,22 @@ pub const SYSCALL_NT_READ_FILE: u64 = 0x03;
 pub const SYSCALL_NT_DEVICE_IO_CONTROL_FILE: u64 = 0x04;
 pub const SYSCALL_NT_WRITE_FILE: u64 = 0x05;
 pub const SYSCALL_NT_CLOSE: u64 = 0x0C;
+pub const SYSCALL_NT_ALLOCATE_VIRTUAL_MEMORY: u64 = 0x15;
+pub const SYSCALL_NT_FREE_VIRTUAL_MEMORY: u64 = 0x1B;
+pub const SYSCALL_NT_QUERY_VIRTUAL_MEMORY: u64 = 0x20;
 pub const SYSCALL_NT_TERMINATE_PROCESS: u64 = 0x29;
 pub const SYSCALL_NT_OPEN_FILE: u64 = 0x30;
 pub const SYSCALL_NT_DELAY_EXECUTION: u64 = 0x31;
 pub const SYSCALL_NT_YIELD_EXECUTION: u64 = 0x43;
+pub const SYSCALL_NT_PROTECT_VIRTUAL_MEMORY: u64 = 0x4D;
 pub const SYSCALL_NT_TERMINATE_THREAD: u64 = 0x50;
 pub const SYSCALL_NT_CREATE_FILE: u64 = 0x52;
 
 /// Initialize x86_64 Model Specific Registers for low-latency SYSCALL/SYSRET
 pub unsafe fn syscall_init() {
-    // 1. Enable SCE (System Call Extensions) in IA32_EFER
+    // 1. Enable SCE (System Call Extensions) and NXE (No-Execute Enable) in IA32_EFER
     let efer = rdmsr(IA32_EFER);
-    wrmsr(IA32_EFER, efer | 1);
+    wrmsr(IA32_EFER, efer | 1 | (1 << 11));
 
     // 2. IA32_STAR:
     // Bits 32..47: SYSCALL CS/SS base = 0x10 (Kernel CS = 0x10, Kernel DS = 0x18)
@@ -249,6 +253,115 @@ pub extern "win64" fn ki_system_call_dispatch(
             status
         }
 
+        SYSCALL_NT_ALLOCATE_VIRTUAL_MEMORY => {
+            unsafe {
+                let process_handle = a1 as usize;
+                let base_address = a2 as *mut *mut core::ffi::c_void;
+                let zero_bits = a3 as usize;
+                let region_size = a4 as *mut usize;
+                let allocation_type = *(user_rsp.wrapping_add(0x28) as *const u32);
+                let protect = *(user_rsp.wrapping_add(0x30) as *const u32);
+
+                let status = crate::nt::ZwAllocateVirtualMemory(
+                    process_handle,
+                    base_address,
+                    zero_bits,
+                    region_size,
+                    allocation_type,
+                    protect,
+                );
+                kprintln!(
+                    "[SYSCALL] NtAllocateVirtualMemory(Proc=0x{:X}, Base=0x{:p}, Size=0x{:X}, Type=0x{:X}, Prot=0x{:X}) -> 0x{:08X}",
+                    process_handle,
+                    if !base_address.is_null() { *base_address } else { core::ptr::null_mut() },
+                    if !region_size.is_null() { *region_size } else { 0 },
+                    allocation_type,
+                    protect,
+                    status
+                );
+                status
+            }
+        }
+
+        SYSCALL_NT_FREE_VIRTUAL_MEMORY => {
+            unsafe {
+                let process_handle = a1 as usize;
+                let base_address = a2 as *mut *mut core::ffi::c_void;
+                let region_size = a3 as *mut usize;
+                let free_type = a4 as u32;
+
+                let status = crate::nt::ZwFreeVirtualMemory(
+                    process_handle,
+                    base_address,
+                    region_size,
+                    free_type,
+                );
+                kprintln!(
+                    "[SYSCALL] NtFreeVirtualMemory(Proc=0x{:X}, Base=0x{:p}, Size=0x{:X}, FreeType=0x{:X}) -> 0x{:08X}",
+                    process_handle,
+                    if !base_address.is_null() { *base_address } else { core::ptr::null_mut() },
+                    if !region_size.is_null() { *region_size } else { 0 },
+                    free_type,
+                    status
+                );
+                status
+            }
+        }
+
+        SYSCALL_NT_QUERY_VIRTUAL_MEMORY => {
+            unsafe {
+                let process_handle = a1 as usize;
+                let base_address = a2 as *mut core::ffi::c_void;
+                let info_class = a3 as u32;
+                let mem_info = a4 as *mut core::ffi::c_void;
+                let mem_info_len = *(user_rsp.wrapping_add(0x28) as *const usize);
+                let return_len = *(user_rsp.wrapping_add(0x30) as *const u64) as *mut usize;
+
+                let status = crate::nt::ZwQueryVirtualMemory(
+                    process_handle,
+                    base_address,
+                    info_class,
+                    mem_info,
+                    mem_info_len,
+                    return_len,
+                );
+                kprintln!(
+                    "[SYSCALL] NtQueryVirtualMemory(Proc=0x{:X}, Base=0x{:p}, InfoClass=0x{:X}) -> 0x{:08X}",
+                    process_handle,
+                    base_address,
+                    info_class,
+                    status
+                );
+                status
+            }
+        }
+
+        SYSCALL_NT_PROTECT_VIRTUAL_MEMORY => {
+            unsafe {
+                let process_handle = a1 as usize;
+                let base_address = a2 as *mut *mut core::ffi::c_void;
+                let region_size = a3 as *mut usize;
+                let new_protect = a4 as u32;
+                let old_protect = *(user_rsp.wrapping_add(0x28) as *const u64) as *mut u32;
+
+                let status = crate::nt::ZwProtectVirtualMemory(
+                    process_handle,
+                    base_address,
+                    region_size,
+                    new_protect,
+                    old_protect,
+                );
+                kprintln!(
+                    "[SYSCALL] NtProtectVirtualMemory(Proc=0x{:X}, Base=0x{:p}, NewProt=0x{:X}) -> 0x{:08X}",
+                    process_handle,
+                    if !base_address.is_null() { *base_address } else { core::ptr::null_mut() },
+                    new_protect,
+                    status
+                );
+                status
+            }
+        }
+
         SYSCALL_NT_YIELD_EXECUTION => {
             kprintln!("[SYSCALL] NtYieldExecution called from Ring 3 - yielding CPU quantum...");
             unsafe { crate::ke::ki_yield(); }
@@ -280,20 +393,21 @@ pub unsafe fn enter_user_mode(entry_point: u64, user_stack: u64, teb: u64) -> ! 
 
     // 2. Execute swapgs so IA32_GS_BASE becomes TEB and IA32_KERNEL_GS_BASE becomes KPCR!
     // 3. Execute iretq into Ring 3!
+    let seg_selector: u64 = 0x2B;
     core::arch::asm!(
-        "mov ax, 0x2B",
-        "mov ds, ax",
-        "mov es, ax",
-        "mov fs, ax",
+        "mov ds, {seg:x}",
+        "mov es, {seg:x}",
+        "mov fs, {seg:x}",
         "swapgs",            // Swap GS: IA32_GS_BASE = user TEB, IA32_KERNEL_GS_BASE = KPCR
         "push 0x2B",         // SS (0x28 | 3)
-        "push {0}",          // RSP (user_stack)
+        "push {stack}",      // RSP (user_stack)
         "push 0x202",        // RFLAGS (IF=1)
         "push 0x33",         // CS (0x30 | 3)
-        "push {1}",          // RIP (entry_point)
+        "push {rip}",        // RIP (entry_point)
         "iretq",
-        in(reg) user_stack,
-        in(reg) entry_point,
+        seg = in(reg) seg_selector,
+        stack = in(reg) user_stack,
+        rip = in(reg) entry_point,
         options(noreturn)
     );
 }
