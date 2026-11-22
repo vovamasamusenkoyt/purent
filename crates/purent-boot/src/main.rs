@@ -1,14 +1,12 @@
 #![no_std]
 #![no_main]
 
-pub mod elf;
-
 use core::panic::PanicInfo;
 use purent_ntdef::loader::{FramebufferInfo, PureNtLoaderBlock, PURENT_LOADER_MAGIC};
-use crate::elf::{Elf64View, PT_LOAD};
+use purent_pe::PeView;
 
-// Embed the kernel built by xtask
-static KERNEL_ELF: &[u8] = include_bytes!("../../../target/esp/purentoskrnl.exe");
+// Embed the kernel built by xtask (native Windows PE32+ executable)
+static KERNEL_PE: &[u8] = include_bytes!("../../../target/esp/purentoskrnl.exe");
 
 static mut LOADER_BLOCK: PureNtLoaderBlock = PureNtLoaderBlock {
     magic: PURENT_LOADER_MAGIC,
@@ -198,16 +196,16 @@ pub extern "efiapi" fn efi_main(
     puts(con_out, " Staging purentoskrnl into higher-half memory...\n");
     puts(con_out, "====================================================\n");
 
-    // 1. Parse embedded kernel ELF
-    let elf = match Elf64View::parse(KERNEL_ELF) {
+    // 1. Parse embedded native PE kernel (purentoskrnl.exe)
+    let pe = match PeView::parse(KERNEL_PE) {
         Ok(view) => view,
         Err(_) => {
-            puts(con_out, "[FATAL] Failed to parse kernel ELF binary!\n");
+            puts(con_out, "[FATAL] Failed to parse purentoskrnl.exe PE binary!\n");
             return 1;
         }
     };
-    let entry_point = elf.entry_point();
-    serial_print("[BOOT] Kernel ELF parsed. Entry point: 0x");
+    let entry_point = pe.image_base() + pe.entry_point_rva() as u64;
+    serial_print("[BOOT] Kernel PE (purentoskrnl.exe) parsed. Entry point: 0x");
     print_hex_u64(entry_point);
     serial_print("\n");
 
@@ -235,18 +233,26 @@ pub extern "efiapi" fn efi_main(
         core::ptr::write_bytes(kernel_phys as *mut u8, 0, 2 * 1024 * 1024);
     }
 
-    // Copy LOAD segments
-    for ph in elf.program_headers() {
-        if ph.r#type == PT_LOAD {
-            let offset_in_kernel = (ph.vaddr - 0xFFFFF80000200000) as usize;
-            let src = &KERNEL_ELF[ph.offset as usize..(ph.offset + ph.filesz) as usize];
-            let dst = (kernel_phys as usize + offset_in_kernel) as *mut u8;
+    // Copy PE headers (first SizeOfHeaders bytes)
+    let headers_size = pe.nt_headers().optional_header.size_of_headers as usize;
+    unsafe {
+        core::ptr::copy_nonoverlapping(KERNEL_PE.as_ptr(), kernel_phys as *mut u8, headers_size);
+    }
+
+    // Copy PE sections
+    for sec in pe.section_headers() {
+        let raw_size = sec.size_of_raw_data as usize;
+        let raw_offset = sec.pointer_to_raw_data as usize;
+        let virt_offset = sec.virtual_address as usize;
+        if raw_size > 0 && raw_offset + raw_size <= KERNEL_PE.len() {
+            let src = unsafe { KERNEL_PE.as_ptr().add(raw_offset) };
+            let dst = (kernel_phys as usize + virt_offset) as *mut u8;
             unsafe {
-                core::ptr::copy_nonoverlapping(src.as_ptr(), dst, ph.filesz as usize);
+                core::ptr::copy_nonoverlapping(src, dst, raw_size);
             }
         }
     }
-    serial_print("[BOOT] Kernel program headers copied.\n");
+    serial_print("[BOOT] Kernel PE sections mapped into memory.\n");
 
     // 3. Allocate 4 pages for page tables (PML4, PDPT_low, PDPT_kernel, PD_kernel)
     let mut pt_phys: u64 = 0;

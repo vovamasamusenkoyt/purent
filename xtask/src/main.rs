@@ -16,21 +16,25 @@ fn build() {
     let boot_dir = esp_dir.join("EFI/BOOT");
     fs::create_dir_all(&boot_dir).expect("Failed to create ESP directory");
 
-    println!("==> [PureNT xtask] 1. Building purent-kernel (x86_64-unknown-none)...");
+    println!("==> [PureNT xtask] 1. Building purent-kernel (x86_64-pc-windows-msvc) as purentoskrnl.exe...");
     let status = Command::new("cargo")
         .current_dir(&root)
+        .env(
+            "RUSTFLAGS",
+            "-C linker=lld-link -C link-arg=/entry:KiSystemStartup -C link-arg=/subsystem:native -C link-arg=/base:0xFFFFF80000200000 -C link-arg=/nodefaultlib",
+        )
         .args([
             "build",
             "--package",
             "purent-kernel",
             "--target",
-            "x86_64-unknown-none",
+            "x86_64-pc-windows-msvc",
         ])
         .status()
         .expect("Failed to build purent-kernel");
     assert!(status.success(), "purent-kernel build failed");
 
-    let kernel_binary = root.join("target/x86_64-unknown-none/debug/purentoskrnl");
+    let kernel_binary = root.join("target/x86_64-pc-windows-msvc/debug/purentoskrnl.exe");
     let dest_kernel = esp_dir.join("purentoskrnl.exe");
     fs::copy(&kernel_binary, &dest_kernel).expect("Failed to copy purentoskrnl.exe");
 

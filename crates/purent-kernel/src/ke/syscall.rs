@@ -73,27 +73,23 @@ pub unsafe extern "C" fn ki_system_call_64() {
         // 6. Enable CPU interrupts during syscall handling (matches Windows NT KiSystemCall64 at 0x14007F723)
         "sti",
 
-        // 7. Windows Syscall calling convention:
-        // EAX = Syscall Number
-        // R10 = Arg 1 (RCX was saved to R10 by ntdll stub before syscall)
-        // RDX = Arg 2
-        // R8  = Arg 3
-        // R9  = Arg 4
-        // [UserRsp + 0x28] = Arg 5, etc.
-        //
-        // Pass to Rust dispatcher `ki_system_call_dispatch(nr, a1, a2, a3, a4, user_rsp)`:
-        // System V AMD64 ABI: RDI, RSI, RDX, RCX, R8, R9
-        "mov rdi, rax",             // arg1: syscall_nr
-        "mov rsi, r10",             // arg2: a1
-        // rdx is already arg3: a2
-        "mov rcx, r8",              // arg4: a3
-        "mov r8, r9",               // arg5: a4
-        "mov r9, qword ptr gs:[0x10]", // arg6: user_rsp
-
-        // Align stack to 16-byte boundary before C call (13 qwords pushed = odd)
-        "sub rsp, 8",
+        // 7. Windows Syscall calling convention -> Win64 ABI call:
+        // EAX = Syscall Number -> RCX (arg 1)
+        // R10 = Arg 1          -> RDX (arg 2)
+        // RDX = Arg 2          -> R8  (arg 3)
+        // R8  = Arg 3          -> R9  (arg 4)
+        // R9  = Arg 4          -> [rsp + 0x20] (arg 5)
+        // User RSP             -> [rsp + 0x28] (arg 6)
+        "sub rsp, 0x38",                // Shadow space (32 bytes) + 2 stack args + 16-byte alignment
+        "mov [rsp + 0x20], r9",         // arg 5: a4
+        "mov r11, qword ptr gs:[0x10]",
+        "mov [rsp + 0x28], r11",        // arg 6: user_rsp
+        "mov r9, r8",                   // arg 4: a3
+        "mov r8, rdx",                  // arg 3: a2
+        "mov rdx, r10",                 // arg 2: a1
+        "mov rcx, rax",                 // arg 1: syscall_nr
         "call {dispatch}",
-        "add rsp, 8",
+        "add rsp, 0x38",
 
         // Disable interrupts for atomic user frame restoration (matches Windows NT KiSystemCall64 at 0x14007F91E)
         "cli",
@@ -128,7 +124,7 @@ pub unsafe extern "C" fn ki_system_call_64() {
 
 /// Central dispatch routine for Windows NT system calls originating from Ring 3
 #[no_mangle]
-pub extern "C" fn ki_system_call_dispatch(
+pub extern "win64" fn ki_system_call_dispatch(
     syscall_nr: u64,
     a1: u64,
     a2: u64,
