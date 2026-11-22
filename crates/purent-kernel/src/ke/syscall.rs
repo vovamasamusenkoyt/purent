@@ -227,13 +227,23 @@ pub extern "win64" fn ki_system_call_dispatch(
 
         SYSCALL_NT_CLOSE => {
             let handle = a1 as usize;
+            let prev_mode: u8 = unsafe {
+                let curr: *const u8;
+                core::arch::asm!("mov {}, gs:[0x188]", out(reg) curr);
+                if !curr.is_null() {
+                    *curr.add(0x1F6)
+                } else {
+                    1
+                }
+            };
+            let mode_str = if prev_mode == 1 { "UserMode (1)" } else { "KernelMode (0)" };
             let status = if handle == 0 || handle > 0x1000 {
                 // Invalid handle (e.g. test handle 0x1337 not present in handle table)
-                kprintln!("[SYSCALL] NtClose(Handle=0x{:X}) -> STATUS_INVALID_HANDLE (0xC0000008)", handle);
+                kprintln!("[SYSCALL] NtClose(Handle=0x{:X}, PreviousMode={}) -> STATUS_INVALID_HANDLE (0xC0000008)", handle, mode_str);
                 0xC0000008u32 as i32 // STATUS_INVALID_HANDLE
             } else {
                 let st = unsafe { crate::nt::ZwClose(handle) };
-                kprintln!("[SYSCALL] NtClose(Handle=0x{:X}) -> Status: 0x{:08X}", handle, st);
+                kprintln!("[SYSCALL] NtClose(Handle=0x{:X}, PreviousMode={}) -> Status: 0x{:08X}", handle, mode_str, st);
                 st
             };
             status

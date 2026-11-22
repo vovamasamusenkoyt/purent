@@ -86,7 +86,15 @@ unsafe fn map_pe_driver(image: &[u8], driver_base: usize, driver_name: &str) -> 
             let src = &image[raw_offset..raw_offset + raw_size];
             let dst = (driver_base + virt_addr) as *mut u8;
             core::ptr::copy_nonoverlapping(src.as_ptr(), dst, raw_size);
-            kprintln!("[LOADER] Mapped section {:<8} -> 0x{:016X} ({} bytes)", sec_name, driver_base + virt_addr, raw_size);
+            let chars = sec.characteristics;
+            let protect_str = if chars & 0x20000000 != 0 {
+                "PAGE_EXECUTE_READ (RX)"
+            } else if chars & 0x80000000 != 0 {
+                "PAGE_READWRITE (RW+NX)"
+            } else {
+                "PAGE_READONLY (RO+NX)"
+            };
+            kprintln!("[LOADER] Mapped section {:<8} -> 0x{:016X} ({} bytes) [{}]", sec_name.trim_end_matches('\0'), driver_base + virt_addr, raw_size, protect_str);
         }
     }
 
@@ -161,6 +169,7 @@ pub unsafe fn load_null_driver() -> bool {
 
     if nt_success(status) {
         kprintln!("[SUCCESS] Driver null.sys successfully loaded and active!");
+        mm_free_driver_initialization("null.sys", driver_base, NULL_SYS_IMAGE);
         true
     } else {
         kprintln!("[FAIL] Driver null.sys failed with code 0x{:08X}", status);
@@ -215,9 +224,28 @@ pub unsafe fn load_fs_rec_driver() -> bool {
 
     if nt_success(status) {
         kprintln!("[SUCCESS] Driver fs_rec.sys (File System Recognizer) successfully loaded and active!");
+        mm_free_driver_initialization("fs_rec.sys", driver_base, FS_REC_SYS_IMAGE);
         true
     } else {
         kprintln!("[FAIL] Driver fs_rec.sys failed with code 0x{:08X}", status);
         false
+    }
+}
+
+pub unsafe fn mm_free_driver_initialization(driver_name: &str, driver_base: usize, pe_bytes: &[u8]) {
+    if let Ok(pe) = PeView::parse(pe_bytes) {
+        let mut freed_bytes = 0;
+        for sec in pe.section_headers() {
+            let name_bytes = &sec.name;
+            let name = core::str::from_utf8(name_bytes).unwrap_or("");
+            if name.starts_with("INIT") || name.starts_with(".reloc") {
+                let virt_addr = sec.virtual_address as usize;
+                let virt_size = sec.virtual_size as usize;
+                let size = if virt_size > 0 { virt_size } else { sec.size_of_raw_data as usize };
+                core::ptr::write_bytes((driver_base + virt_addr) as *mut u8, 0, size);
+                freed_bytes += size;
+            }
+        }
+        kprintln!("[MM] MmFreeDriverInitialization(\"{}\"): discarded INIT and .reloc sections (freed {} bytes pool/image memory)", driver_name, freed_bytes);
     }
 }

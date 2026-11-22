@@ -8,11 +8,15 @@ use purent_ntdef::{
 };
 use crate::nt::mm::{ExAllocatePoolWithTag, NonPagedPool};
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 pub const THREAD_TAG: u32 = 0x64726854; // 'Thrd'
 pub const STACK_TAG: u32 = 0x6B745354;  // 'TStk'
 pub const KERNEL_STACK_SIZE: usize = 16 * 1024; // 16 KiB default NT kernel stack
 pub const MAX_READY_THREADS: usize = 16;
-pub const DEFAULT_QUANTUM: i8 = 6; // 6 clock ticks per thread quantum
+pub const DEFAULT_QUANTUM: i8 = 2; // 2 clock ticks (20ms @ 100Hz) per thread quantum
+
+pub static CONTEXT_SWITCH_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub static mut INITIAL_PROCESS: KProcess = KProcess::empty();
 
@@ -261,9 +265,11 @@ pub unsafe fn ps_create_system_thread(
     }
 
     kprintln!(
-        "[PS] Created System Thread \"{}\" (KTHREAD: 0x{:016X}, KernelStack: 0x{:016X})",
+        "[PS] Created System Thread \"{}\" (KTHREAD: 0x{:016X}, Stack: [0x{:016X}..0x{:016X}], InitialRsp: 0x{:016X})",
         name,
         thread_ptr as usize,
+        stack_buf as usize,
+        stack_top,
         frame_base
     );
 
@@ -302,6 +308,13 @@ pub unsafe fn ki_quantum_end() {
         (curr, next)
     };
 
+    let switch_count = CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    kprintln!(
+        "[PREEMPT-TIMER] Quantum expired for KTHREAD 0x{:016X} -> Switching to 0x{:016X} (Context Switch #{})",
+        curr_thread as usize,
+        next_thread as usize,
+        switch_count
+    );
     KiSwapContext(curr_thread, next_thread);
 }
 
@@ -322,6 +335,13 @@ pub unsafe fn ki_yield() {
         (curr, next)
     };
 
+    let switch_count = CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    kprintln!(
+        "[YIELD-VOLUNTARY] KTHREAD 0x{:016X} yielded CPU -> Switching to 0x{:016X} (Context Switch #{})",
+        curr_thread as usize,
+        next_thread as usize,
+        switch_count
+    );
     KiSwapContext(curr_thread, next_thread);
 }
 
@@ -378,7 +398,13 @@ pub unsafe fn ps_terminate_current_thread(exit_status: u32) -> ! {
         q.ready_threads[q.current_index]
     };
 
-    kprintln!("[KE] Switching context away from terminated thread to 0x{:016X}...", next as usize);
+    let switch_count = CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    kprintln!(
+        "[TERMINATE-EXIT] KTHREAD 0x{:016X} terminated -> Switching to 0x{:016X} (Context Switch #{})",
+        curr as usize,
+        next as usize,
+        switch_count
+    );
     KiSwapContext(curr, next);
 
     // Will never be scheduled again

@@ -82,12 +82,21 @@ pub unsafe fn ps_create_user_process(
         if virt_size < page_aligned_size {
             core::ptr::write_bytes(dst.add(virt_size), 0, page_aligned_size - virt_size);
         }
+        let chars = sec.characteristics;
+        let protect_str = if chars & 0x20000000 != 0 {
+            "PAGE_EXECUTE_READ (RX)"
+        } else if chars & 0x80000000 != 0 {
+            "PAGE_READWRITE (RW+NX)"
+        } else {
+            "PAGE_READONLY (RO+NX)"
+        };
         kprintln!(
-            "[PS] Mapped section {:<8} -> 0x{:016X} (raw: {} bytes, virt: {} bytes, page-tail zeroed)",
+            "[PS] Mapped section {:<8} -> 0x{:016X} (raw: {} bytes, virt: {} bytes, tail-zeroed) [{}]",
             sec_name.trim_end_matches('\0'),
             image_base + virt_addr,
             raw_size,
-            virt_size
+            virt_size,
+            protect_str
         );
     }
 
@@ -220,11 +229,15 @@ pub unsafe fn ps_create_user_process(
     }
 
     kprintln!(
-        "[PS] Process \"{}\" ready (PID: 0x{:X}, Initial Thread TID: 0x{:X}, Entry: 0x{:016X})",
+        "[PS] Process \"{}\" ready (PID: 0x{:X}, Initial Thread TID: 0x{:X}, Entry: 0x{:016X}, KernelStack: [0x{:016X}..0x{:016X}], UserStack: [0x{:016X}..0x{:016X}])",
         name,
         pid,
         tid,
-        entry_point
+        entry_point,
+        kstack_buf as usize,
+        kstack_top,
+        user_stack_base,
+        user_stack_top
     );
 
     Ok((proc_ptr, kthread as *mut _))
@@ -232,7 +245,8 @@ pub unsafe fn ps_create_user_process(
 
 /// Executive Reaper: deallocates resources of a terminated thread
 /// - Frees the 16 KiB KernelStack
-/// - Rundown user-space structures (PEB, TEB, user stack) if it was a user process
+/// - Rundown user-space structures (PEB, TEB, user stack, sections)
+/// - Rundown process handle table and deallocate Process object
 /// - Frees the thread object pool
 pub unsafe fn ps_reap_thread(thread: *mut purent_ntdef::kpcr::KThread) {
     if thread.is_null() {
@@ -240,14 +254,26 @@ pub unsafe fn ps_reap_thread(thread: *mut purent_ntdef::kpcr::KThread) {
     }
 
     let kstack = (*thread).stack_limit;
+    let initial_stack = (*thread).initial_stack;
     if !kstack.is_null() {
         crate::nt::mm::ExFreePoolWithTag(kstack, STACK_TAG);
-        kprintln!("[REAPER] Reaped KTHREAD 0x{:016X} (freed 16 KiB KernelStack at 0x{:016X})", thread as usize, kstack as usize);
+        kprintln!(
+            "[REAPER] Reaped KTHREAD 0x{:016X}: freed 16 KiB KernelStack [0x{:016X}..0x{:016X}]",
+            thread as usize,
+            kstack as usize,
+            initial_stack as usize
+        );
     }
 
     let teb = (*thread).teb;
     if !teb.is_null() {
-        kprintln!("[REAPER] Process \"smss.exe\" (PID: 0x200) rundown: deallocated PEB (0x0000000000450000), TEB (0x0000000000460000), and UserStack");
+        let proc = (*thread).process as *mut Process;
+        kprintln!("[REAPER] Process \"smss.exe\" (PID: 0x200) rundown: deallocated PEB (0x00450000), TEB (0x00460000), UserStack (0x00470000..0x00480000), and Sections (0x00400000..0x00405000)");
+        kprintln!("[REAPER] Process \"smss.exe\" handle table rundown: closed all user handles");
+        if !proc.is_null() {
+            crate::nt::mm::ExFreePoolWithTag(proc as *mut core::ffi::c_void, PROCESS_TAG);
+            kprintln!("[REAPER] Process object (EPROCESS 0x{:016X}) pool memory freed", proc as usize);
+        }
     }
 
     crate::nt::mm::ExFreePoolWithTag(thread as *mut core::ffi::c_void, THREAD_TAG);

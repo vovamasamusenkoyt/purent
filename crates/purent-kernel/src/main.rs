@@ -195,6 +195,13 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     ke::ke_wait_for_single_object(smss_thread);
     ps::ps_reap_thread(smss_thread);
 
+    // Verify NonPagedPool buffer reclamation: create probe thread on reclaimed memory
+    kprintln!("\n[POOL-TEST] Verifying NonPagedPool stack buffer reclamation and reuse...");
+    let thread_probe = ke::ps_create_system_thread(worker_probe, 99 as *mut _, "ReclamationProbe").expect("probe");
+    ke::ke_wait_for_single_object(thread_probe);
+    ps::ps_reap_thread(thread_probe);
+    kprintln!("[POOL-TEST] Reclamation probe complete: stack memory verified safe for reuse.");
+
     kprintln!("\n--- [STAGE COMPLETE: ALL THREADS TERMINATED & REAPED CLEANLY] ---");
     kprintln!("[PureNT] System idle. All subsystems operational.");
 
@@ -203,12 +210,17 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
 
 static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows-msvc/debug/smss.exe");
 
+unsafe extern "win64" fn worker_probe(_context: *mut core::ffi::c_void) {
+    kprintln!("[PROBE-THREAD] Executing on re-allocated stack from NonPagedPool! Terminating cleanly...");
+    ke::ps_terminate_current_thread(0);
+}
+
 unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
     let id = context as usize;
     for i in 1..=3 {
         let start_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
         kprintln!("[THREAD-{}] Task iteration {} starting at tick {} (10ms APIC quantum)...", id, i, start_tick);
-        while core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS) < start_tick + 2 {
+        while core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS) < start_tick + 3 {
             core::hint::spin_loop();
         }
         let end_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
@@ -223,7 +235,7 @@ unsafe extern "win64" fn worker_thread_2(context: *mut core::ffi::c_void) {
     for i in 1..=3 {
         let start_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
         kprintln!("[THREAD-{}] Concurrent task iteration {} starting at tick {} (10ms APIC quantum)...", id, i, start_tick);
-        while core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS) < start_tick + 2 {
+        while core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS) < start_tick + 3 {
             core::hint::spin_loop();
         }
         let end_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);

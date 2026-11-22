@@ -4,8 +4,8 @@
 use purent_hal::kprintln;
 use purent_ntdef::{
     io::{
-        DeviceObject, FileObject, IoStatusBlock, IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_READ,
-        IRP_MJ_WRITE,
+        DeviceObject, FileObject, IoStatusBlock, IRP_MJ_CLEANUP, IRP_MJ_CLOSE, IRP_MJ_CREATE,
+        IRP_MJ_READ, IRP_MJ_WRITE,
     },
     object::{AccessMask, ObjectAttributes, GENERIC_READ, GENERIC_WRITE},
     status::{
@@ -16,7 +16,7 @@ use purent_ntdef::{
 };
 
 use crate::nt::{
-    io::{io_get_next_irp_stack_location, IoAllocateIrp, IoCallDriver},
+    io::{io_get_next_irp_stack_location, IoAllocateIrp, IoCallDriver, IoFreeIrp},
     mm::{ExAllocatePoolWithTag, ExFreePoolWithTag, NonPagedPool},
     ob::{
         ob_close_handle, ob_create_handle, ob_insert_file, ob_reference_object_by_handle,
@@ -107,6 +107,7 @@ pub unsafe extern "win64" fn ZwCreateFile(
         (*io_status_block).status = status;
         (*io_status_block).information = 1; // FILE_OPENED
         kprintln!("[ZW] ZwCreateFile dispatched IRP_MJ_CREATE: HANDLE 0x{:X}, Status: 0x{:08X}", handle, status);
+        IoFreeIrp(irp);
         return status;
     }
 
@@ -168,6 +169,7 @@ pub unsafe extern "win64" fn ZwWriteFile(
     let status = IoCallDriver(dev_obj, irp);
     (*io_status_block).status = status;
     (*io_status_block).information = (*irp).io_status.information;
+    IoFreeIrp(irp);
     status
 }
 
@@ -217,6 +219,7 @@ pub unsafe extern "win64" fn ZwReadFile(
 
     let status = IoCallDriver(dev_obj, irp);
     (*io_status_block).status = status;
+    IoFreeIrp(irp);
     status
 }
 
@@ -234,13 +237,27 @@ pub unsafe extern "win64" fn ZwClose(handle: usize) -> NtStatus {
             let dev_obj = (*file_obj).device_object;
             if !dev_obj.is_null() {
                 let stack_size = (*dev_obj).stack_size.max(1);
-                let irp = IoAllocateIrp(stack_size, 0);
-                if !irp.is_null() {
-                    let stack = io_get_next_irp_stack_location(irp);
+
+                // 1. Dispatch IRP_MJ_CLEANUP (cancels in-flight requests, notifies driver)
+                let cleanup_irp = IoAllocateIrp(stack_size, 0);
+                if !cleanup_irp.is_null() {
+                    let stack = io_get_next_irp_stack_location(cleanup_irp);
+                    (*stack).major_function = IRP_MJ_CLEANUP;
+                    (*stack).device_object = dev_obj;
+                    (*stack).file_object = file_obj as *mut core::ffi::c_void;
+                    IoCallDriver(dev_obj, cleanup_irp);
+                    IoFreeIrp(cleanup_irp);
+                }
+
+                // 2. Dispatch IRP_MJ_CLOSE (closes file context)
+                let close_irp = IoAllocateIrp(stack_size, 0);
+                if !close_irp.is_null() {
+                    let stack = io_get_next_irp_stack_location(close_irp);
                     (*stack).major_function = IRP_MJ_CLOSE;
                     (*stack).device_object = dev_obj;
                     (*stack).file_object = file_obj as *mut core::ffi::c_void;
-                    IoCallDriver(dev_obj, irp);
+                    IoCallDriver(dev_obj, close_irp);
+                    IoFreeIrp(close_irp);
                 }
             }
             ExFreePoolWithTag(file_obj as *mut core::ffi::c_void, FILE_TAG);
