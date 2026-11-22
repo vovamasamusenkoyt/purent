@@ -3,7 +3,7 @@
 
 use super::font::{FONT_HEIGHT, FONT_WIDTH};
 use super::surface::{Rect, Surface};
-use super::wnd::Window;
+use super::wnd::{Window, BORDER_WIDTH, CAPTION_HEIGHT};
 
 pub const CONSOLE_COLS: usize = 80;
 pub const CONSOLE_ROWS: usize = 24;
@@ -19,8 +19,8 @@ impl ConsoleWindow {
     pub fn new(x: i32, y: i32) -> Self {
         let client_w = (CONSOLE_COLS * FONT_WIDTH) as u32; // 640
         let client_h = (CONSOLE_ROWS * FONT_HEIGHT) as u32; // 384
-        let outer_w = client_w + 8; // 648
-        let outer_h = client_h + 28 + 8; // 420
+        let outer_w = client_w + BORDER_WIDTH * 2; // 652
+        let outer_h = client_h + CAPTION_HEIGHT + BORDER_WIDTH; // 420
 
         Self {
             window: Window::new(

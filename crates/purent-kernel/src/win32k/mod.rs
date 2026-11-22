@@ -49,11 +49,11 @@ pub fn win32k_init(fb: &FramebufferInfo) {
 
     let desktop = Desktop::new(fb.width, fb.height);
 
-    // Center the 648x420 console window on the 1280x800 display (accounting for 36px taskbar)
-    let console_w = 648;
+    // Center the 652x420 console window on the 1280x800 display (accounting for 40px taskbar)
+    let console_w = 652;
     let console_h = 420;
     let win_x = ((fb.width as i32) - console_w) / 2;
-    let win_y = ((fb.height as i32) - 36 - console_h) / 2;
+    let win_y = ((fb.height as i32) - 40 - console_h) / 2;
     let mut console = ConsoleWindow::new(win_x.max(10), win_y.max(10));
 
     // Initial banner inside the cmd console window

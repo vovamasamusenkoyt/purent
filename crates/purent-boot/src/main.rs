@@ -237,28 +237,28 @@ pub extern "efiapi" fn efi_main(
     print_hex_u64(entry_point);
     serial_print("\n");
 
-    // 2. Allocate 2MB physical pages at 0x00200000 for the kernel
+    // 2. Allocate 4MB physical pages at 0x00200000 for the kernel
     let mut kernel_phys: u64 = 0x00200000;
     let alloc_status = unsafe {
-        ((*bs).allocate_pages)(2, 2, 512, &mut kernel_phys) // AllocateAddress, EfiLoaderData, 512 pages (2MB)
+        ((*bs).allocate_pages)(2, 2, 1024, &mut kernel_phys) // AllocateAddress, EfiLoaderData, 1024 pages (4MB)
     };
     if alloc_status != 0 {
         // Fall back to AllocateAnyPages
         let fallback_status = unsafe {
-            ((*bs).allocate_pages)(0, 2, 512, &mut kernel_phys)
+            ((*bs).allocate_pages)(0, 2, 1024, &mut kernel_phys)
         };
         if fallback_status != 0 {
             puts(con_out, "[FATAL] Failed to allocate physical pages for kernel!\n");
             return 1;
         }
     }
-    serial_print("[BOOT] Allocated 2MB physical memory for kernel at: 0x");
+    serial_print("[BOOT] Allocated 4MB physical memory for kernel at: 0x");
     print_hex_u64(kernel_phys);
     serial_print("\n");
 
     // Clear allocated memory
     unsafe {
-        core::ptr::write_bytes(kernel_phys as *mut u8, 0, 2 * 1024 * 1024);
+        core::ptr::write_bytes(kernel_phys as *mut u8, 0, 4 * 1024 * 1024);
     }
 
     // Copy PE headers (first SizeOfHeaders bytes)
@@ -408,7 +408,7 @@ pub extern "efiapi" fn efi_main(
     unsafe {
         LOADER_BLOCK.kernel_physical_base = kernel_phys;
         LOADER_BLOCK.kernel_virtual_base = 0xFFFFF80000200000;
-        LOADER_BLOCK.kernel_size = 2 * 1024 * 1024;
+        LOADER_BLOCK.kernel_size = 4 * 1024 * 1024;
         LOADER_BLOCK.cr3_pml4 = pt_phys;
     }
 
