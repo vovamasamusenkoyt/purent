@@ -1,0 +1,11 @@
+[package]
+name = "purent-shell32"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "shell32"
+crate-type = ["cdylib"]
+
+[dependencies]
+purent-ntdef = { path = "../purent-ntdef" }

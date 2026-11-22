@@ -3,7 +3,11 @@
 
 use purent_hal::kprintln;
 use purent_ntdef::status::{NtStatus, STATUS_INVALID_HANDLE, STATUS_NOT_IMPLEMENTED, STATUS_SUCCESS};
-use purent_ntdef::syscall::TrapFrame;
+use purent_ntdef::syscall::{
+    TrapFrame, SYSCALL_PURENT_COMPOSE_RECEIVE, SYSCALL_PURENT_COMPOSE_FINISH, SYSCALL_PURENT_CONSOLE_INPUT, SYSCALL_PURENT_CONSOLE_EVENT,
+    SYSCALL_PURENT_CONSOLE_SUBMIT, SYSCALL_PURENT_CONSOLE_OUTPUT, SYSCALL_PURENT_SHOW_DIALOG,
+};
+use crate::win32k::{self, input::{self, CONSOLE_INPUT}};
 use purent_ntdef::{IoStatusBlock, ObjectAttributes};
 
 use super::syscall::*;
@@ -16,7 +20,38 @@ pub extern "win64" fn ki_system_call_dispatch(frame: &mut TrapFrame) {
     let a3 = frame.r8;
     let a4 = frame.r9;
 
+    if syscall_nr == SYSCALL_PURENT_CONSOLE_INPUT {
+        frame.rax = if crate::ps::current_process_id() == Some(win32k::CONSOLE_CLIENT_PID) {
+            CONSOLE_INPUT.wait_pop() as u64
+        } else {
+            purent_ntdef::status::STATUS_ACCESS_DENIED as u64
+        };
+        return;
+    }
+    if matches!(syscall_nr, SYSCALL_PURENT_CONSOLE_EVENT | SYSCALL_PURENT_CONSOLE_OUTPUT | SYSCALL_PURENT_CONSOLE_SUBMIT) {
+        use purent_ntdef::status::{STATUS_ACCESS_DENIED, STATUS_INVALID_PARAMETER};
+        frame.rax = if crate::ps::current_process_id() != Some(win32k::CONHOST_PID) {
+            STATUS_ACCESS_DENIED as u64
+        } else {
+            match syscall_nr {
+                SYSCALL_PURENT_CONSOLE_EVENT => input::wait_host_event(),
+                SYSCALL_PURENT_CONSOLE_OUTPUT => input::read_output_packet(),
+                SYSCALL_PURENT_CONSOLE_SUBMIT if matches!(a1, 10 | 13 | 32..=126) => {
+                    while !CONSOLE_INPUT.push(a1 as u8) {
+                        unsafe { purent_hal::cpu::halt() };
+                    }
+                    STATUS_SUCCESS as u64
+                }
+                _ => STATUS_INVALID_PARAMETER as u64,
+            }
+        };
+        return;
+    }
+
     let status: NtStatus = match syscall_nr {
+        SYSCALL_PURENT_COMPOSE_RECEIVE => win32k::compositor::receive(),
+        SYSCALL_PURENT_COMPOSE_FINISH => win32k::compositor::finish(),
+        SYSCALL_PURENT_SHOW_DIALOG => unsafe { crate::win32k::show_dialog(a1 as usize) },
         SYSCALL_NT_CREATE_FILE => unsafe {
             let file_handle = a1 as *mut usize;
             let desired_access = a2 as u32;

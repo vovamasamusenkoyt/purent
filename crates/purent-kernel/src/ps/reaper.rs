@@ -59,6 +59,8 @@ pub unsafe fn ps_reap_thread(thread: *mut KThread) {
 /// - Remove from SCHED_QUEUE ready threads
 /// - Switch immediately to next ready thread via KiSwapContext
 pub unsafe fn ps_terminate_current_thread(exit_status: u32) -> ! {
+    // No timer switch may occur between removing the current thread and swapping its stack.
+    core::arch::asm!("cli", options(nomem, nostack));
     let curr = {
         let q = SCHED_QUEUE.lock();
         q.ready_threads[q.current_index]

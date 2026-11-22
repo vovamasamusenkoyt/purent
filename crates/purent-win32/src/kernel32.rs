@@ -3,7 +3,7 @@
 
 use purent_ntdef::syscall::{
     nt_current_peb_address, nt_syscall0, nt_syscall1, nt_syscall2, nt_syscall4,
-    nt_syscall6, nt_syscall7,
+    nt_syscall6, nt_syscall7, SYSCALL_PURENT_CONSOLE_INPUT,
 };
 
 pub static mut LAST_ERROR: u32 = 0;
@@ -194,23 +194,30 @@ pub unsafe extern "win64" fn ReadFile(
 
 #[no_mangle]
 pub unsafe extern "win64" fn ReadConsoleW(
-    _console_input: usize,
+    console_input: usize,
     buffer: *mut u16,
     number_of_chars_to_read: u32,
     number_of_chars_read: *mut u32,
     _input_control: usize,
 ) -> i32 {
-    // Scripted command sequence for verification
-    static mut CMD_STEP: usize = 0;
-    let cmd_str: &[u8] = match CMD_STEP {
-        0 => b"echo [PureNT] Original Microsoft Windows 7 cmd.exe running on PureNT Kernel!\r\n",
-        1 => b"ver\r\n",
-        _ => b"exit\r\n",
-    };
-    CMD_STEP += 1;
-    let len = cmd_str.len().min(number_of_chars_to_read as usize);
-    for i in 0..len {
-        *buffer.add(i) = cmd_str[i] as u16;
+    if !number_of_chars_read.is_null() {
+        *number_of_chars_read = 0;
+    }
+    if buffer.is_null() || console_input != GetStdHandle(STD_INPUT_HANDLE) {
+        return 0;
+    }
+    let capacity = number_of_chars_to_read as usize;
+    let mut len = 0;
+    while len < capacity {
+        let ch = nt_syscall0(SYSCALL_PURENT_CONSOLE_INPUT);
+        if ch < 0 {
+            return 0;
+        }
+        *buffer.add(len) = ch as u16;
+        len += 1;
+        if ch == 10 {
+            break;
+        }
     }
     if !number_of_chars_read.is_null() {
         *number_of_chars_read = len as u32;
@@ -584,7 +591,7 @@ pub unsafe extern "win64" fn UnhandledExceptionFilter(_info: usize) -> i32 { 1 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn GetModuleHandleW(_module_name: *const u16) -> usize {
-    0x000000004ad00000 // cmd.exe ImageBase
+    (*(nt_current_peb_address() as *const purent_ntdef::ps::Peb)).image_base_address as usize
 }
 
 #[no_mangle]

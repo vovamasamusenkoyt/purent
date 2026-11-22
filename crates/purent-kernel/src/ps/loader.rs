@@ -31,6 +31,7 @@ pub unsafe fn ps_create_user_process(
     pe_bytes: &[u8],
     name: &'static str,
     pid: usize,
+    environment_base: usize,
 ) -> Result<(*mut Process, *mut purent_ntdef::kpcr::KThread), NtStatus> {
     kprintln!("\n[PS] Staging User-Mode PE process \"{}\" (PID: 0x{:X}, {} bytes PE)...", name, pid, pe_bytes.len());
 
@@ -142,7 +143,7 @@ pub unsafe fn ps_create_user_process(
     }
 
     // 2. Allocate and format Process Environment Block (PEB) at 0x0000000000450000
-    let peb_addr = 0x0000000000450000usize;
+    let peb_addr = environment_base;
     let peb_frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
     core::ptr::write_bytes(phys_to_virt::<u8>(peb_frame), 0, 4096);
     vmm_map_user_page(
@@ -179,7 +180,7 @@ pub unsafe fn ps_create_user_process(
     kprintln!("[PS] Initialized PEB at 0x{:016X} (NT {}.{} Build {})", peb_addr, (*peb).os_major_version, (*peb).os_minor_version, (*peb).os_build_number);
 
     // 3. Allocate and format Thread Environment Block (TEB) at 0x0000000000460000
-    let teb_addr = 0x0000000000460000usize;
+    let teb_addr = environment_base + 0x10000;
     let teb_frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
     core::ptr::write_bytes(phys_to_virt::<u8>(teb_frame), 0, 4096);
     vmm_map_user_page(
@@ -190,8 +191,8 @@ pub unsafe fn ps_create_user_process(
     )?;
     let teb = teb_addr as *mut Teb;
 
-    let user_stack_base = 0x0000000000470000usize;
-    let user_stack_top = (0x0000000000480000usize - 0x80) & !0xFu64 as usize; // 16-byte aligned
+    let user_stack_base = environment_base + 0x20000;
+    let user_stack_top = (user_stack_base + 0x10000 - 0x80) & !0xFu64 as usize; // 16-byte aligned
 
     // Map 64 KiB (16 pages) for user stack
     for s in 0..16 {
@@ -304,11 +305,208 @@ pub unsafe fn ps_create_user_process(
     Ok((proc_ptr, kthread as *mut _))
 }
 
-pub unsafe fn ps_create_cmd_process(
+/// Map the read-only user alias of KUSER_SHARED_DATA used by Windows GUI executables.
+pub unsafe fn ps_map_user_shared_data() -> Result<(), NtStatus> {
+    let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+    core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
+    vmm_map_user_page(
+        purent_hal::cpu::read_cr3(), 0x7FFE0000, frame, PTE_PRESENT | PTE_USER | PTE_NX,
+    )
+}
+
+const WIN32_MODULES: &[(&str, &[u8])] = &[
+    ("user32.dll", include_bytes!("../../../../target/esp/user32.dll")),
+    ("shell32.dll", include_bytes!("../../../../target/esp/shell32.dll")),
+];
+
+unsafe fn map_win32_dll(cr3: u64, bytes: &[u8], pe: &PeView<'_>) -> Result<(), NtStatus> {
+    let base = pe.image_base() as usize;
+    let optional_header = &pe.nt_headers().optional_header;
+    let win32_hdr_pages = (optional_header.size_of_headers as usize + 4095) / 4096;
+    for i in 0..win32_hdr_pages {
+        let va = (base + i * 4096) as u64;
+        let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+        core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
+        vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
+    }
+    if (optional_header.size_of_headers as usize) <= bytes.len() {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, optional_header.size_of_headers as usize);
+    }
+
+    for sec in pe.section_headers() {
+        let raw_offset = sec.pointer_to_raw_data as usize;
+        let raw_size = sec.size_of_raw_data as usize;
+        let virt_addr = sec.virtual_address as usize;
+        let virt_size = sec.virtual_size as usize;
+        let sec_va = base + virt_addr;
+
+        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
+        let sec_pages = page_aligned_size / 4096;
+        for j in 0..sec_pages {
+            let va = (sec_va + j * 4096) as u64;
+            let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+            core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
+            vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
+        }
+
+        let dst = sec_va as *mut u8;
+        if raw_size > 0 && raw_offset + raw_size <= bytes.len() {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr().add(raw_offset), dst, raw_size);
+        }
+        if virt_size < page_aligned_size {
+            core::ptr::write_bytes(dst.add(virt_size), 0, page_aligned_size - virt_size);
+        }
+
+    }
+    Ok(())
+}
+
+fn resolve_pe_export(bytes: &[u8], name: &str) -> Option<u64> {
+    let pe = PeView::parse(bytes).ok()?;
+    let directory = pe.data_directory(purent_pe::IMAGE_DIRECTORY_ENTRY_EXPORT)?;
+    if directory.virtual_address == 0 || directory.size < 40 {
+        return None;
+    }
+    let dir = pe.rva_to_offset(directory.virtual_address)?;
+    let read_u32 = |offset| Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?));
+    let count = read_u32(dir + 24)? as usize;
+    let names = pe.rva_to_offset(read_u32(dir + 32)?)?;
+    let ordinals = pe.rva_to_offset(read_u32(dir + 36)?)?;
+    let addresses = pe.rva_to_offset(read_u32(dir + 28)?)?;
+
+    for index in 0..count {
+        let name_offset = pe.rva_to_offset(read_u32(names + index * 4)?)?;
+        let export_name = bytes.get(name_offset..)?.split(|&byte| byte == 0).next()?;
+        if export_name != name.as_bytes() {
+            continue;
+        }
+        let ordinal_offset = ordinals + index * 2;
+        let ordinal = u16::from_le_bytes(bytes.get(ordinal_offset..ordinal_offset + 2)?.try_into().ok()?) as usize;
+        if ordinal >= read_u32(dir + 20)? as usize {
+            return None;
+        }
+        let rva = read_u32(addresses + ordinal * 4)?;
+        let directory_end = directory.virtual_address.checked_add(directory.size)?;
+        if rva == 0 || rva >= pe.size_of_image() || (directory.virtual_address..directory_end).contains(&rva) {
+            return None;
+        }
+        return pe.image_base().checked_add(rva as u64);
+    }
+    None
+}
+
+unsafe fn bind_win32_imports(pe: &PeView<'_>, win32_exports: &[Win32ExportEntry]) -> usize {
+    let base = pe.image_base() as usize;
+    let mut bound_count = 0;
+    if let Some(imp_dir) = pe.data_directory(IMAGE_DIRECTORY_ENTRY_IMPORT) {
+        if imp_dir.virtual_address != 0 && imp_dir.size != 0 {
+            let mut desc_offset = base + imp_dir.virtual_address as usize;
+            loop {
+                let desc = &*(desc_offset as *const ImageImportDescriptor);
+                if desc.name == 0 && desc.first_thunk == 0 {
+                    break;
+                }
+
+                let dll_name_ptr = (base + desc.name as usize) as *const u8;
+                let mut dll_len = 0;
+                while *dll_name_ptr.add(dll_len) != 0 {
+                    dll_len += 1;
+                }
+                let dll_name = core::str::from_utf8(core::slice::from_raw_parts(dll_name_ptr, dll_len)).unwrap_or("");
+
+                let thunk_rva = if desc.original_first_thunk != 0 {
+                    desc.original_first_thunk as usize
+                } else {
+                    desc.first_thunk as usize
+                };
+                let iat_rva = desc.first_thunk as usize;
+
+                let mut slot = 0;
+                loop {
+                    let thunk_val = *((base + thunk_rva + slot * 8) as *const u64);
+                    if thunk_val == 0 {
+                        break;
+                    }
+
+                    if thunk_val & 0x8000_0000_0000_0000 == 0 {
+                        let hint_name_rva = (thunk_val & 0xFFFF_FFFF) as usize;
+                        let name_ptr = (base + hint_name_rva + 2) as *const u8;
+                        let mut f_len = 0;
+                        while *name_ptr.add(f_len) != 0 {
+                            f_len += 1;
+                        }
+                        let func_name = core::str::from_utf8(core::slice::from_raw_parts(name_ptr, f_len)).unwrap_or("");
+
+                        let module_export = WIN32_MODULES.iter()
+                            .find(|(module, _)| module.eq_ignore_ascii_case(dll_name))
+                            .and_then(|(module, bytes)| {
+                                let address = resolve_pe_export(bytes, func_name)?;
+                                kprintln!("[PS] Bound {}!{} at 0x{:016X}", module, func_name, address);
+                                Some(address)
+                            });
+                        let resolved = module_export.or_else(|| {
+                            win32_exports.iter().find_map(|entry| {
+                                let e_dll = core::str::from_utf8(&entry.dll).ok()?.trim_end_matches('\0');
+                                let e_func = core::str::from_utf8(&entry.func).ok()?.trim_end_matches('\0');
+                                (e_dll.eq_ignore_ascii_case(dll_name) && e_func == func_name)
+                                    .then_some(entry.addr as u64)
+                            })
+                        }).unwrap_or(0);
+
+                        if resolved != 0 {
+                            let iat_slot_ptr = (base + iat_rva + slot * 8) as *mut u64;
+                            *iat_slot_ptr = resolved;
+                            bound_count += 1;
+                        } else {
+                            kprintln!("[PS] Warning: Unresolved import {}!{}", dll_name, func_name);
+                        }
+                    }
+                    slot += 1;
+                }
+
+                desc_offset += core::mem::size_of::<ImageImportDescriptor>();
+            }
+        }
+    }
+    bound_count
+
+}
+
+unsafe fn protect_win32_image(cr3: u64, pe: &PeView<'_>) -> Result<(), NtStatus> {
+    let base = pe.image_base() as usize;
+    for sec in pe.section_headers() {
+        let virt_addr = sec.virtual_address as usize;
+        let virt_size = sec.virtual_size as usize;
+        let raw_size = sec.size_of_raw_data as usize;
+        let sec_va = base + virt_addr;
+        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
+        let sec_pages = page_aligned_size / 4096;
+
+        let chars = sec.characteristics;
+        let pte_flags = if chars & 0x20000000 != 0 {
+            PTE_PRESENT | PTE_USER
+        } else if chars & 0x80000000 != 0 {
+            PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX
+        } else {
+            PTE_PRESENT | PTE_USER | PTE_NX
+        };
+
+        for j in 0..sec_pages {
+            let va = (sec_va + j * 4096) as u64;
+            vmm_protect_user_page(cr3, va, pte_flags)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub unsafe fn ps_create_win32_process(
     cmd_pe_bytes: &[u8],
     win32_pe_bytes: &[u8],
     name: &'static str,
     pid: usize,
+    environment_base: usize,
+    map_runtime: bool,
 ) -> Result<(*mut Process, *mut purent_ntdef::kpcr::KThread), NtStatus> {
     kprintln!("\n[PS] Staging original Windows 7 x64 \"{}\" (PID: 0x{:X}) with PureNT Win32 subsystem...", name, pid);
 
@@ -321,54 +519,14 @@ pub unsafe fn ps_create_cmd_process(
     })?;
     let win32_base = win32_pe.image_base() as usize;
 
-    kprintln!("[PS] Mapping Win32 subsystem runtime at 0x{:016X}...", win32_base);
-    let win32_opt = &win32_pe.nt_headers().optional_header;
-    let win32_hdr_pages = (win32_opt.size_of_headers as usize + 4095) / 4096;
-    for i in 0..win32_hdr_pages {
-        let va = (win32_base + i * 4096) as u64;
-        let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-        core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
-        vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
-    }
-    if (win32_opt.size_of_headers as usize) <= win32_pe_bytes.len() {
-        core::ptr::copy_nonoverlapping(win32_pe_bytes.as_ptr(), win32_base as *mut u8, win32_opt.size_of_headers as usize);
-    }
-
-    for sec in win32_pe.section_headers() {
-        let raw_offset = sec.pointer_to_raw_data as usize;
-        let raw_size = sec.size_of_raw_data as usize;
-        let virt_addr = sec.virtual_address as usize;
-        let virt_size = sec.virtual_size as usize;
-        let sec_va = win32_base + virt_addr;
-
-        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
-        let sec_pages = page_aligned_size / 4096;
-        for j in 0..sec_pages {
-            let va = (sec_va + j * 4096) as u64;
-            let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-            core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
-            vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
-        }
-
-        let dst = sec_va as *mut u8;
-        if raw_size > 0 && raw_offset + raw_size <= win32_pe_bytes.len() {
-            core::ptr::copy_nonoverlapping(win32_pe_bytes.as_ptr().add(raw_offset), dst, raw_size);
-        }
-        if virt_size < page_aligned_size {
-            core::ptr::write_bytes(dst.add(virt_size), 0, page_aligned_size - virt_size);
-        }
-
-        let chars = sec.characteristics;
-        let pte_flags = if chars & 0x20000000 != 0 {
-            PTE_PRESENT | PTE_USER
-        } else if chars & 0x80000000 != 0 {
-            PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX
-        } else {
-            PTE_PRESENT | PTE_USER | PTE_NX
-        };
-        for j in 0..sec_pages {
-            let va = (sec_va + j * 4096) as u64;
-            let _ = vmm_protect_user_page(cr3, va, pte_flags);
+    if map_runtime {
+        kprintln!("[PS] Mapping Win32 subsystem runtime at 0x{:016X}...", win32_base);
+        map_win32_dll(cr3, win32_pe_bytes, &win32_pe)?;
+        for (module, bytes) in WIN32_MODULES {
+            let pe = PeView::parse(bytes).map_err(|_| STATUS_UNSUCCESSFUL)?;
+            map_win32_dll(cr3, bytes, &pe)?;
+            let base = pe.image_base();
+            kprintln!("[PS] Mapped {} at 0x{:016X}", module, base);
         }
     }
 
@@ -384,6 +542,16 @@ pub unsafe fn ps_create_cmd_process(
     }
     let win32_exports = exports_slice.ok_or(STATUS_UNSUCCESSFUL)?;
     kprintln!("[PS] Win32 subsystem runtime active: {} functions exported", win32_exports.len());
+
+    if map_runtime {
+        for (module, bytes) in WIN32_MODULES {
+            let pe = PeView::parse(bytes).map_err(|_| STATUS_UNSUCCESSFUL)?;
+            bind_win32_imports(&pe, win32_exports);
+            protect_win32_image(cr3, &pe)?;
+            kprintln!("[PS] Ready: {}", module);
+        }
+        protect_win32_image(cr3, &win32_pe)?;
+    }
 
     // 2. Map cmd.exe PE sections at 0x000000004AD00000
     let cmd_pe = PeView::parse(cmd_pe_bytes).map_err(|e| {
@@ -437,100 +605,13 @@ pub unsafe fn ps_create_cmd_process(
         }
     }
 
-    // 3. Resolve and Bind cmd.exe Import Address Table (IAT)
-    let mut bound_count = 0;
-    if let Some(imp_dir) = cmd_pe.data_directory(IMAGE_DIRECTORY_ENTRY_IMPORT) {
-        if imp_dir.virtual_address != 0 && imp_dir.size != 0 {
-            let mut desc_offset = cmd_base + imp_dir.virtual_address as usize;
-            loop {
-                let desc = &*(desc_offset as *const ImageImportDescriptor);
-                if desc.name == 0 && desc.first_thunk == 0 {
-                    break;
-                }
+    let bound_count = bind_win32_imports(&cmd_pe, win32_exports);
+    kprintln!("[PS] Bound {} IAT import entries for {}", bound_count, name);
 
-                let dll_name_ptr = (cmd_base + desc.name as usize) as *const u8;
-                let mut dll_len = 0;
-                while *dll_name_ptr.add(dll_len) != 0 {
-                    dll_len += 1;
-                }
-                let dll_name = core::str::from_utf8(core::slice::from_raw_parts(dll_name_ptr, dll_len)).unwrap_or("");
-
-                let thunk_rva = if desc.original_first_thunk != 0 {
-                    desc.original_first_thunk as usize
-                } else {
-                    desc.first_thunk as usize
-                };
-                let iat_rva = desc.first_thunk as usize;
-
-                let mut slot = 0;
-                loop {
-                    let thunk_val = *((cmd_base + thunk_rva + slot * 8) as *const u64);
-                    if thunk_val == 0 {
-                        break;
-                    }
-
-                    if thunk_val & 0x8000_0000_0000_0000 == 0 {
-                        let hint_name_rva = (thunk_val & 0xFFFF_FFFF) as usize;
-                        let name_ptr = (cmd_base + hint_name_rva + 2) as *const u8;
-                        let mut f_len = 0;
-                        while *name_ptr.add(f_len) != 0 {
-                            f_len += 1;
-                        }
-                        let func_name = core::str::from_utf8(core::slice::from_raw_parts(name_ptr, f_len)).unwrap_or("");
-
-                        let mut resolved: u64 = 0;
-                        for entry in win32_exports {
-                            let e_dll = core::str::from_utf8(&entry.dll).unwrap_or("").trim_end_matches('\0');
-                            let e_func = core::str::from_utf8(&entry.func).unwrap_or("").trim_end_matches('\0');
-                            if e_dll.eq_ignore_ascii_case(dll_name) && e_func == func_name {
-                                resolved = entry.addr as usize as u64;
-                                break;
-                            }
-                        }
-
-                        if resolved != 0 {
-                            let iat_slot_ptr = (cmd_base + iat_rva + slot * 8) as *mut u64;
-                            *iat_slot_ptr = resolved;
-                            bound_count += 1;
-                        } else {
-                            kprintln!("[PS] Warning: Unresolved import {}!{}", dll_name, func_name);
-                        }
-                    }
-                    slot += 1;
-                }
-
-                desc_offset += core::mem::size_of::<ImageImportDescriptor>();
-            }
-        }
-    }
-    kprintln!("[PS] Bound {} IAT import entries for cmd.exe directly to purent-win32", bound_count);
-
-    // Protect cmd.exe sections after IAT binding
-    for sec in cmd_pe.section_headers() {
-        let virt_addr = sec.virtual_address as usize;
-        let virt_size = sec.virtual_size as usize;
-        let raw_size = sec.size_of_raw_data as usize;
-        let sec_va = cmd_base + virt_addr;
-        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
-        let sec_pages = page_aligned_size / 4096;
-
-        let chars = sec.characteristics;
-        let pte_flags = if chars & 0x20000000 != 0 {
-            PTE_PRESENT | PTE_USER
-        } else if chars & 0x80000000 != 0 {
-            PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX
-        } else {
-            PTE_PRESENT | PTE_USER | PTE_NX
-        };
-
-        for j in 0..sec_pages {
-            let va = (sec_va + j * 4096) as u64;
-            let _ = vmm_protect_user_page(cr3, va, pte_flags);
-        }
-    }
+    protect_win32_image(cr3, &cmd_pe)?;
 
     // 4. Initialize Process Environment Block (PEB) at 0x0000000000550000
-    let peb_addr = 0x0000000000550000usize;
+    let peb_addr = environment_base;
     let peb_frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
     core::ptr::write_bytes(phys_to_virt::<u8>(peb_frame), 0, 4096);
     vmm_map_user_page(cr3, peb_addr as u64, peb_frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX)?;
@@ -547,7 +628,7 @@ pub unsafe fn ps_create_cmd_process(
     (*peb).os_csd_version = 1;
     (*peb).os_platform_id = 2;        // VER_PLATFORM_WIN32_NT
     (*peb).session_id = 0;
-    (*peb).image_subsystem = 3;       // Windows CUI
+    (*peb).image_subsystem = opt_hdr.subsystem as u32;
     (*peb).image_subsystem_major_version = 6;
     (*peb).image_subsystem_minor_version = 1;
     (*peb).active_process_affinity_mask = 1;
@@ -569,21 +650,21 @@ pub unsafe fn ps_create_cmd_process(
     (*params).current_directory_path.buffer = curdir_buf;
 
     let img_buf = (peb_addr + 0x680) as *mut u16;
-    let img_str = [
-        'C' as u16, ':' as u16, '\\' as u16, 'W' as u16, 'i' as u16, 'n' as u16, 'd' as u16, 'o' as u16, 'w' as u16, 's' as u16,
-        '\\' as u16, 'S' as u16, 'y' as u16, 's' as u16, 't' as u16, 'e' as u16, 'm' as u16, '3' as u16, '2' as u16,
-        '\\' as u16, 'c' as u16, 'm' as u16, 'd' as u16, '.' as u16, 'e' as u16, 'x' as u16, 'e' as u16, 0
-    ];
-    for i in 0..img_str.len() { *img_buf.add(i) = img_str[i]; }
-    (*params).image_path_name.length = 54;
-    (*params).image_path_name.maximum_length = 56;
+    let directory = b"C:\\Windows\\System32\\";
+    for (index, byte) in directory.iter().chain(name.as_bytes()).enumerate() {
+        *img_buf.add(index) = *byte as u16;
+    }
+    let image_chars = directory.len() + name.len();
+    (*params).image_path_name.length = (image_chars * 2) as u16;
+    (*params).image_path_name.maximum_length = ((image_chars + 1) * 2) as u16;
     (*params).image_path_name.buffer = img_buf;
 
     let cmdline_buf = (peb_addr + 0x700) as *mut u16;
-    let cmdline_str = [ 'c' as u16, 'm' as u16, 'd' as u16, '.' as u16, 'e' as u16, 'x' as u16, 'e' as u16, 0 ];
-    for i in 0..cmdline_str.len() { *cmdline_buf.add(i) = cmdline_str[i]; }
-    (*params).command_line.length = 14;
-    (*params).command_line.maximum_length = 16;
+    for (index, byte) in name.bytes().enumerate() {
+        *cmdline_buf.add(index) = byte as u16;
+    }
+    (*params).command_line.length = (name.len() * 2) as u16;
+    (*params).command_line.maximum_length = ((name.len() + 1) * 2) as u16;
     (*params).command_line.buffer = cmdline_buf;
 
     (*peb).process_parameters = params;
@@ -591,14 +672,15 @@ pub unsafe fn ps_create_cmd_process(
     kprintln!("[PS] Initialized PEB at 0x{:016X} (NT {}.{} Build {})", peb_addr, (*peb).os_major_version, (*peb).os_minor_version, (*peb).os_build_number);
 
     // 5. Initialize Thread Environment Block (TEB) at 0x0000000000560000
-    let teb_addr = 0x0000000000560000usize;
+    let teb_addr = environment_base + 0x10000;
     let teb_frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
     core::ptr::write_bytes(phys_to_virt::<u8>(teb_frame), 0, 4096);
     vmm_map_user_page(cr3, teb_addr as u64, teb_frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX)?;
     let teb = teb_addr as *mut Teb;
 
-    let user_stack_base = 0x0000000000570000usize;
-    let user_stack_top = (0x00000000005B0000usize - 0x80) & !0xFu64 as usize;
+    let user_stack_base = environment_base + 0x20000;
+    let stack_end = user_stack_base + 0x40000;
+    let user_stack_top = (stack_end - 0x80) & !0xFu64 as usize;
 
     // Map 64 pages (256 KB stack)
     for s in 0..64 {
@@ -609,7 +691,7 @@ pub unsafe fn ps_create_cmd_process(
     }
 
     let tid = pid + 4;
-    (*teb).nt_tib.stack_base = (0x00000000005B0000usize) as *mut core::ffi::c_void;
+    (*teb).nt_tib.stack_base = stack_end as *mut core::ffi::c_void;
     (*teb).nt_tib.stack_limit = user_stack_base as *mut core::ffi::c_void;
     (*teb).nt_tib.self_ptr = &mut (*teb).nt_tib;
     (*teb).client_id.unique_process = pid as *mut core::ffi::c_void;

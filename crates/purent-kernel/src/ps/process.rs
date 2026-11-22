@@ -22,3 +22,12 @@ pub struct Thread {
     pub user_stack_base: usize,
     pub user_stack_limit: usize,
 }
+
+/// Retrieves the scheduler's process ID for the current thread.
+pub fn current_process_id() -> Option<usize> {
+    unsafe {
+        let thread = purent_hal::cpu::read_gs_u64(0x188) as *const KThread;
+        let process = thread.as_ref()?.process.cast::<Process>();
+        process.as_ref().map(|process| process.unique_process_id)
+    }
+}

@@ -8,6 +8,17 @@ const CURSOR_HEIGHT: usize = 17;
 
 static WALLPAPER_RGB565: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/wallpaper_640x400_rgb565.bin"));
 
+const WALL_WIDTH: usize = 640;
+const WALL_HEIGHT: usize = 400;
+const fn wallpaper_pixel(x: usize, y: usize) -> u32 {
+    let byte = (y * WALL_WIDTH + x) * 2;
+    let rgb565 = u16::from_le_bytes([WALLPAPER_RGB565[byte], WALLPAPER_RGB565[byte + 1]]);
+    let r = ((rgb565 >> 11) & 31) as u32 * 255 / 31;
+    let g = ((rgb565 >> 5) & 63) as u32 * 255 / 63;
+    let b = (rgb565 & 31) as u32 * 255 / 31;
+    0xFF000000 | r << 16 | g << 8 | b
+}
+
 pub struct Desktop {
     pub width: u32,
     pub height: u32,
@@ -39,17 +50,10 @@ impl Desktop {
         };
 
         for y in region.y..region.bottom() {
-            let src_y = (y as usize * 400) / self.height as usize;
-            let row_offset = src_y * 640;
+            let src_y = y as usize * WALL_HEIGHT / self.height as usize;
             for x in region.x..region.right() {
-                let src_x = (x as usize * 640) / self.width as usize;
-                let offset = (row_offset + src_x) * 2;
-                let pixel565 = u16::from_le_bytes([WALLPAPER_RGB565[offset], WALLPAPER_RGB565[offset + 1]]);
-                let r = (((pixel565 >> 11) & 0x1F) as u32 * 255) / 31;
-                let g = (((pixel565 >> 5) & 0x3F) as u32 * 255) / 63;
-                let b = ((pixel565 & 0x1F) as u32 * 255) / 31;
-                let argb = 0xFF000000 | (r << 16) | (g << 8) | b;
-                surface.put_pixel(x, y, argb);
+                let src_x = x as usize * WALL_WIDTH / self.width as usize;
+                surface.put_pixel(x, y, wallpaper_pixel(src_x, src_y));
             }
         }
     }
@@ -67,6 +71,10 @@ impl Desktop {
         ] {
             self.draw_background_region(surface, strip);
         }
+    }
+
+    pub fn cursor_rect(&self) -> Rect {
+        Rect::new(self.mouse_x, self.mouse_y, CURSOR_WIDTH as u32, CURSOR_HEIGHT as u32)
     }
 
     pub fn erase_cursor(&self, surface: &mut Surface) {

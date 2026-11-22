@@ -13,48 +13,9 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     len
 }
 
-#[no_mangle]
-#[allow(suspicious_runtime_symbol_definitions)]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    let mut i = 0;
-    while i < n {
-        *dest.add(i) = *src.add(i);
-        i += 1;
-    }
-    dest
-}
-
-#[no_mangle]
-#[allow(suspicious_runtime_symbol_definitions)]
-pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    memcpy(dest, src, n)
-}
-
-#[no_mangle]
-#[allow(suspicious_runtime_symbol_definitions)]
-pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
-    let mut i = 0;
-    while i < n {
-        *dest.add(i) = c as u8;
-        i += 1;
-    }
-    dest
-}
-
-#[no_mangle]
-#[allow(suspicious_runtime_symbol_definitions)]
-pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
-    let mut i = 0;
-    while i < n {
-        let a = *s1.add(i);
-        let b = *s2.add(i);
-        if a != b {
-            return (a as i32) - (b as i32);
-        }
-        i += 1;
-    }
-    0
-}
+#[path = "../../purent-ntdef/src/freestanding.rs"]
+mod freestanding;
+pub use freestanding::*;
 
 #[no_mangle]
 pub static mut _fmode: i32 = 0;
@@ -62,9 +23,6 @@ pub static mut _fmode: i32 = 0;
 pub static mut _commode: i32 = 0;
 #[no_mangle]
 pub static mut _errno: i32 = 0;
-#[no_mangle]
-pub static _fltused: i32 = 0;
-
 // Fake CRT _iob array for stdin (0), stdout (1), stderr (2)
 #[repr(C)]
 pub struct FILE {
@@ -148,12 +106,6 @@ pub unsafe extern "C" fn __getmainargs(
     if !argc.is_null() { *argc = 1; }
     if !argv.is_null() { *argv = &raw mut EMPTY_ARGV as *mut *mut u8; }
     if !envp.is_null() { *envp = &raw mut EMPTY_ENVP as *mut *mut u8; }
-    0
-}
-
-#[no_mangle]
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn __CxxFrameHandler3() -> i32 {
     0
 }
 
@@ -602,4 +554,25 @@ pub unsafe extern "C" fn _vsnwprintf(
     }
     *buffer.add(out_idx) = 0;
     out_idx as i32
+}
+
+static WINVER_NAME: [u16; 11] = [119, 105, 110, 118, 101, 114, 46, 101, 120, 101, 0];
+
+#[no_mangle]
+pub static mut _wcmdln: *const u16 = WINVER_NAME.as_ptr();
+
+#[no_mangle]
+pub unsafe extern "C" fn __wgetmainargs(
+    argc: *mut i32,
+    argv: *mut *mut *const u16,
+    envp: *mut *mut *const u16,
+    _expand: i32,
+    _startup: usize,
+) -> i32 {
+    static mut ARGV: [*const u16; 2] = [WINVER_NAME.as_ptr(), core::ptr::null()];
+    static mut ENVP: [*const u16; 1] = [core::ptr::null()];
+    *argc = 1;
+    *argv = (&raw mut ARGV).cast();
+    *envp = (&raw mut ENVP).cast();
+    0
 }

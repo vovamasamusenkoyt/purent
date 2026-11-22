@@ -8,6 +8,19 @@ pub const BORDER_RIGHT: u32 = 10;
 pub const BORDER_BOTTOM: u32 = 10;
 pub const CAPTION_HEIGHT: u32 = 32;
 
+const CAPTION_BUTTONS_WIDTH: u32 = 104;
+const CAPTION_BUTTONS_HEIGHT: u32 = 21;
+const CAPTION_BUTTONS_INSET: i32 = 8;
+const CLOSE_BUTTON_WIDTH: u32 = 48;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CaptionHit {
+    Outside,
+    Caption,
+    Buttons,
+    Close,
+}
+
 static CAPSULE_104X21: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/capsule_104x21.raw"));
 static CMD_ICON_16X16: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/cmd_icon_16x16.raw"));
 
@@ -41,7 +54,46 @@ impl Window {
         )
     }
 
-    /// Renders the authentic Windows 7 Aero Glass Window Frame matching DWM composition
+    fn caption_buttons(&self) -> Rect {
+        Rect::new(
+            self.rect.right() - CAPTION_BUTTONS_INSET - CAPTION_BUTTONS_WIDTH as i32,
+            self.rect.y + 1,
+            CAPTION_BUTTONS_WIDTH,
+            CAPTION_BUTTONS_HEIGHT,
+        )
+    }
+
+    pub fn hit_test_caption(&self, x: i32, y: i32) -> CaptionHit {
+        let buttons = self.caption_buttons();
+        if buttons.contains(x, y) {
+            if x >= buttons.right() - CLOSE_BUTTON_WIDTH as i32 {
+                CaptionHit::Close
+            } else {
+                CaptionHit::Buttons
+            }
+        } else if !self.is_minimized
+            && Rect::new(self.rect.x, self.rect.y, self.rect.width, CAPTION_HEIGHT).contains(x, y)
+        {
+            CaptionHit::Caption
+        } else {
+            CaptionHit::Outside
+        }
+    }
+
+    pub fn draw_glass(&self, surface: &mut Surface, redirected: bool) {
+        let rect = self.rect;
+        let client = self.client_rect();
+        let color = if redirected { purent_ntdef::composition::GLASS_PIXEL } else { 0xFFA0B2BF };
+        for strip in [
+            Rect::new(rect.x, rect.y, rect.width, CAPTION_HEIGHT),
+            Rect::new(rect.x, client.y, BORDER_LEFT, client.height),
+            Rect::new(client.right(), client.y, BORDER_RIGHT, client.height),
+            Rect::new(rect.x, client.bottom(), rect.width, BORDER_BOTTOM),
+        ] {
+            surface.fill_rect(strip, color);
+        }
+    }
+
     pub fn draw_frame(&self, surface: &mut Surface) {
         if self.is_minimized {
             return;
@@ -49,115 +101,16 @@ impl Window {
 
         let rx = self.rect.x;
         let ry = self.rect.y;
-        let rw = self.rect.width as i32;
-        let rh = self.rect.height as i32;
-        let right = rx + rw;
-        let bottom = ry + rh;
+        surface.draw_rect(self.rect, 0xFF667988);
+        surface.fill_rect(Rect::new(rx + 1, ry + 1, self.rect.width - 2, 1), 0xFFE4EDF2);
+        let client = self.client_rect();
+        surface.draw_rect(
+            Rect::new(client.x - 1, client.y - 1, client.width + 2, client.height + 2),
+            0xFF778894,
+        );
 
-        // 1. Frosted Translucent Aero Glass Titlebar (0..32px)
-        for y_rel in 0..CAPTION_HEIGHT as i32 {
-            let py = ry + y_rel;
-            let color = if y_rel == 0 {
-                0xFF323232 // Outer 1px frame line
-            } else if y_rel == 1 {
-                0xFFFEFEFE // Crisp 1px highlight line
-            } else if y_rel == 30 {
-                0xFFFCFCFC
-            } else if y_rel == 31 {
-                0xFF797979 // Inner client separator line
-            } else {
-                0xFFFBFBFB // Pure frosted glass
-            };
-
-            for px in rx..right {
-                surface.put_pixel(px, py, color);
-            }
-        }
-
-        // 2. Left Aero Glass Border (10px wide)
-        for x_rel in 0..BORDER_LEFT as i32 {
-            let lx = rx + x_rel;
-            let color = if x_rel == 0 {
-                0xFF323232 // Outer 1px frame line
-            } else if x_rel == 1 {
-                0xFFFFFFFF // Highlight line
-            } else if x_rel == 9 {
-                0xFF797979 // Inner client separator line
-            } else {
-                0xFFFDFDFD // Frosted glass border fill
-            };
-
-            for py in (ry + CAPTION_HEIGHT as i32)..bottom {
-                surface.put_pixel(lx, py, color);
-            }
-        }
-
-        // 3. Right Aero Glass Border (10px wide: x = right - 10..right)
-        for x_rel in 0..BORDER_RIGHT as i32 {
-            let rrx = right - BORDER_RIGHT as i32 + x_rel;
-            let color = if x_rel == 0 {
-                0xFF797979 // Inner client separator line
-            } else if x_rel == 8 {
-                0xFFFFFFFF // Highlight line
-            } else if x_rel == 9 {
-                0xFF323232 // Outer 1px frame line
-            } else {
-                0xFFFDFDFD // Frosted glass border fill
-            };
-
-            for py in (ry + CAPTION_HEIGHT as i32)..bottom {
-                surface.put_pixel(rrx, py, color);
-            }
-        }
-
-        // 4. Bottom Aero Glass Border (10px tall: y = bottom - 10..bottom)
-        for y_rel in 0..BORDER_BOTTOM as i32 {
-            let py = bottom - BORDER_BOTTOM as i32 + y_rel;
-            let color = if y_rel == 0 {
-                0xFF797979 // Inner client separator line
-            } else if y_rel == 1 {
-                0xFFFCFCFC
-            } else if y_rel == 8 {
-                0xFFFEFEFE // Highlight line
-            } else if y_rel == 9 {
-                0xFF323232 // Outer 1px frame line
-            } else {
-                0xFFFBFBFB // Frosted glass base fill
-            };
-
-            for px in rx..right {
-                surface.put_pixel(px, py, color);
-            }
-        }
-
-        // 5. Smooth Rounded Top Corners (Radius 8px)
-        let top_radius = 8;
-        for j in 0..top_radius {
-            for i in 0..top_radius {
-                let dist_sq = (top_radius - 1 - i) * (top_radius - 1 - i) + (top_radius - 1 - j) * (top_radius - 1 - j);
-                if dist_sq > (top_radius * top_radius - top_radius * 2) {
-                    surface.put_pixel(rx + i, ry + j, 0xFF323232);
-                    surface.put_pixel(right - 1 - i, ry + j, 0xFF323232);
-                }
-            }
-        }
-
-        // 6. Smooth Rounded Bottom Corners (Radius 6px)
-        let bot_radius = 6;
-        for j in 0..bot_radius {
-            for i in 0..bot_radius {
-                let dist_sq = (bot_radius - 1 - i) * (bot_radius - 1 - i) + (bot_radius - 1 - j) * (bot_radius - 1 - j);
-                if dist_sq > (bot_radius * bot_radius - bot_radius * 2) {
-                    surface.put_pixel(rx + i, bottom - 1 - j, 0xFF323232);
-                    surface.put_pixel(right - 1 - i, bottom - 1 - j, 0xFF323232);
-                }
-            }
-        }
-
-        // 7. Floating Caption Buttons Capsule at top-right (x = rx + 453, y = ry + 1)
-        let cap_x = rx + 453;
-        let cap_y = ry + 1;
-        surface.blit_raw_rgba(cap_x, cap_y, 104, 21, CAPSULE_104X21);
+        let buttons = self.caption_buttons();
+        surface.blit_raw_rgba(buttons.x, buttons.y, buttons.width, buttons.height, CAPSULE_104X21);
 
         // 8. Authentic 16x16 Command Prompt [C:\] Application Icon
         let icon_x = rx + 10;
@@ -171,11 +124,11 @@ impl Window {
             for &dx in &[-1, 1, 0] {
                 for &dy in &[-1, 1, 0] {
                     if dx != 0 || dy != 0 {
-                        surface.draw_text(text_x + dx, text_y + dy, self.title, 0xFFFFFFFF, None);
+                        surface.draw_text(text_x + dx, text_y + dy, self.title, 0xFFDCE7ED, None);
                     }
                 }
             }
-            surface.draw_text(text_x, text_y, self.title, 0xFF202020, None);
+            surface.draw_text(text_x, text_y, self.title, 0xFF172932, None);
         }
     }
 }

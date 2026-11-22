@@ -131,7 +131,9 @@ pub unsafe extern "win64" fn ZwWriteFile(
     // Special handling for Console / Stdout (Handle 1, 4)
     if file_handle == 1 || file_handle == 4 {
         let slice = core::slice::from_raw_parts(buffer as *const u8, length as usize);
-        if let Ok(s) = core::str::from_utf8(slice) {
+        if crate::ps::current_process_id() == Some(crate::win32k::CONSOLE_CLIENT_PID) {
+            crate::win32k::console_client_write(slice);
+        } else if let Ok(s) = core::str::from_utf8(slice) {
             purent_hal::kprint!("{}", s);
             crate::win32k::win32k_console_write(s);
         } else {

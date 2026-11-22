@@ -1,0 +1,12 @@
+[package]
+name = "purent-user32"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "user32"
+crate-type = ["cdylib"]
+
+[dependencies]
+purent-pe = { path = "../purent-pe" }
+purent-ntdef = { path = "../purent-ntdef" }

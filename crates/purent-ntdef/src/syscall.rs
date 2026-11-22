@@ -3,6 +3,18 @@
 
 use crate::status::NtStatus;
 
+/// PureNT console service. Waits for and returns one ASCII input byte.
+pub const SYSCALL_PURENT_CONSOLE_INPUT: u64 = 0x8000;
+pub const SYSCALL_PURENT_SHOW_DIALOG: u64 = 0x8001;
+pub const SYSCALL_PURENT_CONSOLE_EVENT: u64 = 0x8002;
+pub const SYSCALL_PURENT_CONSOLE_SUBMIT: u64 = 0x8003;
+pub const SYSCALL_PURENT_CONSOLE_OUTPUT: u64 = 0x8004;
+pub const SYSCALL_PURENT_COMPOSE_RECEIVE: u64 = 0x8005;
+pub const SYSCALL_PURENT_COMPOSE_FINISH: u64 = 0x8006;
+/// Packed console output uses the low 24 bits for bytes and the next byte for length.
+pub const CONSOLE_OUTPUT_LENGTH_SHIFT: u32 = 24;
+pub const CONSOLE_LINE_CAPACITY: usize = 1024;
+
 /// Hardware and executive trap frame constructed on kernel stack upon `syscall` entry.
 /// Matches standard Windows NT x64 `_KTRAP_FRAME` layout for system service dispatch.
 #[repr(C)]

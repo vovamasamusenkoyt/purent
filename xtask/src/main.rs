@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod dwm;
+
 fn project_root() -> PathBuf {
     Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into()))
         .parent()
@@ -15,6 +17,19 @@ fn build() {
     let esp_dir = root.join("target/esp");
     let boot_dir = esp_dir.join("EFI/BOOT");
     fs::create_dir_all(&boot_dir).expect("Failed to create ESP directory");
+
+    // Winver is optional and supplied by the local Windows reference image.
+    for name in ["winver.exe", "winver.exe.mui"] {
+        let source = root.join("refs/win7_7601_x64/winver").join(name);
+        let destination = esp_dir.join(name);
+        match fs::read(&source) {
+            Ok(bytes) => fs::write(destination, bytes).expect("Failed to stage winver"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::write(destination, []).expect("Failed to stage empty winver resource");
+            }
+            Err(error) => panic!("Failed to read {}: {error}", source.display()),
+        }
+    }
 
     println!("==> [PureNT xtask] 1. Building User-Mode native subsystem (smss.exe)...");
     let status = Command::new("cargo")
@@ -38,6 +53,24 @@ fn build() {
     let dest_smss = esp_dir.join("smss.exe");
     fs::copy(&smss_binary, &dest_smss).expect("Failed to copy smss.exe");
 
+    for (package, executable, base) in [
+        ("conhost", "conhost.exe", "0x00500000"),
+        ("purent-dwm", "dwm.exe", "0x00600000"),
+    ] {
+        let flags = format!(
+            "-C linker=lld-link -C link-arg=/entry:main -C link-arg=/subsystem:native -C link-arg=/base:{base} -C link-arg=/nodefaultlib"
+        );
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .env("RUSTFLAGS", flags)
+            .args(["build", "--package", package, "--target", "x86_64-pc-windows-msvc"])
+            .status()
+            .expect("Failed to build desktop process");
+        assert!(status.success(), "{package} build failed");
+        fs::copy(root.join("target/x86_64-pc-windows-msvc/debug").join(executable), esp_dir.join(executable))
+            .expect("Failed to stage desktop process");
+    }
+
     println!("==> [PureNT xtask] 2. Building purent-win32 subsystem runtime (purent_win32.dll)...");
     let status = Command::new("cargo")
         .current_dir(&root)
@@ -59,6 +92,25 @@ fn build() {
     let win32_binary = root.join("target/x86_64-pc-windows-msvc/debug/purent_win32.dll");
     let dest_win32 = esp_dir.join("purent_win32.dll");
     fs::copy(&win32_binary, &dest_win32).expect("Failed to copy purent_win32.dll");
+
+    for (name, export, base) in [
+        ("user32", "LoadStringW", "0x71000000"),
+        ("shell32", "ShellAboutW", "0x72000000"),
+    ] {
+        let flags = format!(
+            "-C linker=lld-link -C link-arg=/entry:DllMain -C link-arg=/subsystem:native -C link-arg=/nodefaultlib -C link-arg=/base:{base} -C link-arg=/export:{export}"
+        );
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .env("RUSTFLAGS", flags)
+            .args(["build", "--package", &format!("purent-{name}"), "--target", "x86_64-pc-windows-msvc"])
+            .status()
+            .expect("Failed to build Win32 module");
+        assert!(status.success(), "{name}.dll build failed");
+        let file = format!("{name}.dll");
+        fs::copy(root.join("target/x86_64-pc-windows-msvc/debug").join(&file), esp_dir.join(file))
+            .expect("Failed to stage Win32 module");
+    }
 
     let cmd_binary = root.join("refs/win7_7601_x64/binaries/cmd.exe");
     let dest_cmd = esp_dir.join("cmd.exe");
@@ -230,6 +282,12 @@ fn main() {
         "build" => build(),
         "run" => run(),
         "screenshot" => screenshot(),
-        other => eprintln!("Unknown command: {}. Available: build, run, screenshot", other),
+        "dwm" => {
+            if let Err(error) = dwm::prepare(&project_root(), env::args_os().skip(2)) {
+                eprintln!("dwm: {error}");
+                std::process::exit(1);
+            }
+        }
+        other => eprintln!("Unknown command: {}. Available: build, run, screenshot, dwm", other),
     }
 }

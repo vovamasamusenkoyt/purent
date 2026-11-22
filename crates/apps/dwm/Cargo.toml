@@ -1,0 +1,11 @@
+[package]
+name = "purent-dwm"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dwm"
+path = "src/main.rs"
+
+[dependencies]
+purent-ntdef = { path = "../../purent-ntdef" }

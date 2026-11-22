@@ -28,6 +28,12 @@ impl Rect {
         px >= self.x && px < self.right() && py >= self.y && py < self.bottom()
     }
 
+    pub fn union(&self, other: Rect) -> Rect {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Rect::new(x, y, (self.right().max(other.right()) - x) as u32, (self.bottom().max(other.bottom()) - y) as u32)
+    }
+
     pub fn intersect(&self, other: &Rect) -> Option<Rect> {
         let x1 = self.x.max(other.x);
         let y1 = self.y.max(other.y);
@@ -103,19 +109,34 @@ impl Surface {
     /// The source and destination buffers must not overlap.
     pub unsafe fn blit_opaque(&mut self, source: &Surface, x: i32, y: i32) {
         let target = Rect::new(x, y, source.width, source.height);
+        self.blit_clipped(source, target, target);
+    }
+
+    /// Copies a screen-space region between separate surfaces with the same origin.
+    ///
+    /// The source and destination buffers must not overlap.
+    pub unsafe fn copy_region(&mut self, source: &Surface, region: Rect) {
+        let target = Rect::new(0, 0, source.width, source.height);
+        self.blit_clipped(source, target, region);
+    }
+
+    unsafe fn blit_clipped(&mut self, source: &Surface, target: Rect, region: Rect) {
         let bounds = Rect::new(0, 0, self.width, self.height);
-        let Some(clipped) = target.intersect(&bounds) else {
+        let Some(clipped) = target.intersect(&bounds).and_then(|rect| rect.intersect(&region)) else {
             return;
         };
-        let source_x = (clipped.x - x) as usize;
-        let source_y = (clipped.y - y) as usize;
+        let source_x = (clipped.x - target.x) as usize;
+        let source_y = (clipped.y - target.y) as usize;
         for row in 0..clipped.height as usize {
             let src = (source_y + row) * source.stride as usize + source_x;
             let dst = (clipped.y as usize + row) * self.stride as usize + clipped.x as usize;
-            core::ptr::copy_nonoverlapping(
-                source.buffer.add(src),
-                self.buffer.add(dst),
-                clipped.width as usize,
+            // Copy whole 32-bit pixels without the kernel's byte-by-byte memcpy.
+            core::arch::asm!(
+                "rep movsd",
+                inout("rsi") source.buffer.add(src) => _,
+                inout("rdi") self.buffer.add(dst) => _,
+                inout("rcx") clipped.width as usize => _,
+                options(nostack, preserves_flags),
             );
         }
     }

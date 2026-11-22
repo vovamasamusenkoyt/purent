@@ -36,7 +36,7 @@ unsafe impl Sync for Win32ExportEntry {}
 
 #[no_mangle]
 #[link_section = ".exports"]
-pub static WIN32_EXPORTS: [Win32ExportEntry; 229] = [
+pub static WIN32_EXPORTS: [Win32ExportEntry; 234] = [
     Win32ExportEntry { dll: [b'm', b's', b'v', b'c', b'r', b't', b'.', b'd', b'l', b'l', 0, 0, 0, 0, 0, 0], func: [b'm', b'e', b'm', b's', b'e', b't', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], addr: memset as *const () },
     Win32ExportEntry { dll: [b'm', b's', b'v', b'c', b'r', b't', b'.', b'd', b'l', b'l', 0, 0, 0, 0, 0, 0], func: [b'm', b'e', b'm', b'c', b'p', b'y', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], addr: memcpy as *const () },
     Win32ExportEntry { dll: [b'm', b's', b'v', b'c', b'r', b't', b'.', b'd', b'l', b'l', 0, 0, 0, 0, 0, 0], func: [b'm', b'e', b'm', b'c', b'm', b'p', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], addr: memcmp as *const () },
@@ -266,7 +266,25 @@ pub static WIN32_EXPORTS: [Win32ExportEntry; 229] = [
     Win32ExportEntry { dll: [b'K', b'E', b'R', b'N', b'E', b'L', b'3', b'2', b'.', b'd', b'l', b'l', 0, 0, 0, 0], func: [b'R', b'e', b'g', b'D', b'e', b'l', b'e', b't', b'e', b'K', b'e', b'y', b'E', b'x', b'W', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], addr: RegDeleteKeyExW as *const () },
     Win32ExportEntry { dll: [b'K', b'E', b'R', b'N', b'E', b'L', b'3', b'2', b'.', b'd', b'l', b'l', 0, 0, 0, 0], func: [b'G', b'e', b't', b'C', b'u', b'r', b'r', b'e', b'n', b't', b'P', b'r', b'o', b'c', b'e', b's', b's', b'I', b'd', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], addr: GetCurrentProcessId as *const () },
     Win32ExportEntry { dll: [b'W', b'I', b'N', b'B', b'R', b'A', b'N', b'D', b'.', b'd', b'l', b'l', 0, 0, 0, 0], func: [b'B', b'r', b'a', b'n', b'd', b'i', b'n', b'g', b'F', b'o', b'r', b'm', b'a', b't', b'S', b't', b'r', b'i', b'n', b'g', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], addr: BrandingFormatString as *const () },
+    export(b"kernel32.dll", b"RtlLookupFunctionEntry", RtlLookupFunctionEntry as *const ()),
+    export(b"kernel32.dll", b"RtlVirtualUnwind", RtlVirtualUnwind as *const ()),
+    export(b"kernel32.dll", b"RtlCaptureContext", RtlCaptureContext as *const ()),
+    export(b"msvcrt.dll", b"_wcmdln", (&raw const _wcmdln).cast()),
+    export(b"msvcrt.dll", b"__wgetmainargs", __wgetmainargs as *const ()),
 ];
+
+const fn export(dll: &[u8], func: &[u8], addr: *const ()) -> Win32ExportEntry {
+    const fn padded<const N: usize>(bytes: &[u8]) -> [u8; N] {
+        let mut field = [0; N];
+        let mut index = 0;
+        while index < bytes.len() {
+            field[index] = bytes[index];
+            index += 1;
+        }
+        field
+    }
+    Win32ExportEntry { dll: padded(dll), func: padded(func), addr }
+}
 
 #[inline(never)]
 pub fn resolve_win32_symbol(dll: &str, func: &str) -> Option<usize> {

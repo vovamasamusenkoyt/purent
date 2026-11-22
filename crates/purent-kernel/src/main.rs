@@ -193,7 +193,7 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     let thread2 = ke::ps_create_system_thread(worker_thread_2, 2 as *mut _, "KernelWorker-2").expect("worker2");
 
     // Load and launch real Windows User-Mode PE executable (smss.exe)
-    let (_smss_proc, smss_thread) = ps::ps_create_user_process(SMSS_EXE_BYTES, "smss.exe", 0x200).expect("smss");
+    let (_smss_proc, smss_thread) = ps::ps_create_user_process(SMSS_EXE_BYTES, "smss.exe", 0x200, 0x450000).expect("smss");
 
     kprintln!("[KE] Kernel workers and smss.exe process active. Synchronizing via KeWaitForSingleObject...");
 
@@ -207,14 +207,6 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     ke::ke_wait_for_single_object(smss_thread);
     ps::ps_reap_thread(smss_thread);
 
-    // 11. Launch original Microsoft Windows 7 SP1 x64 cmd.exe
-    kprintln!("\n--- [STAGE: ORIGINAL MICROSOFT WINDOWS 7 CMD.EXE EXECUTION] ---");
-    let (_cmd_proc, cmd_thread) = ps::ps_create_cmd_process(CMD_EXE_BYTES, WIN32_DLL_BYTES, "cmd.exe", 0x300).expect("cmd.exe");
-    kprintln!("[KE] Original Microsoft cmd.exe active. Synchronizing via KeWaitForSingleObject...");
-    ke::ke_wait_for_single_object(cmd_thread);
-    ps::ps_reap_thread(cmd_thread);
-    kprintln!("--- [STAGE COMPLETE: ORIGINAL CMD.EXE EXECUTED & REAPED CLEANLY] ---");
-
     // Verify NonPagedPool buffer reclamation: create probe thread on reclaimed memory
     kprintln!("\n[POOL-TEST] Verifying NonPagedPool stack buffer reclamation and reuse...");
     let thread_probe = ke::ps_create_system_thread(worker_probe, 99 as *mut _, "ReclamationProbe").expect("probe");
@@ -223,13 +215,43 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     kprintln!("[POOL-TEST] Reclamation probe complete: stack memory verified safe for reuse.");
 
     kprintln!("\n--- [STAGE COMPLETE: ALL THREADS TERMINATED & REAPED CLEANLY] ---");
+    win32k::win32k_reset_console();
+    purent_hal::ps2_mouse_init();
+    if win32k::prepare_compositor() {
+        ps::ps_create_user_process(DWM_EXE_BYTES, "dwm.exe", win32k::DWM_PID, 0x1650000)
+            .expect("dwm.exe");
+        win32k::activate_compositor();
+    }
+    ps::ps_create_user_process(CONHOST_EXE_BYTES, "conhost.exe", win32k::CONHOST_PID, 0x450000)
+        .expect("conhost.exe");
+    let (_cmd_proc, cmd_thread) = ps::ps_create_win32_process(
+        CMD_EXE_BYTES, WIN32_DLL_BYTES, "cmd.exe", win32k::CONSOLE_CLIENT_PID, 0x550000, true,
+    ).expect("cmd.exe");
+    let winver_thread = if WINVER_EXE_BYTES.is_empty() || WINVER_MUI_BYTES.is_empty() {
+        core::ptr::null_mut()
+    } else {
+        match ps::ps_map_user_shared_data().and_then(|()| {
+            ps::ps_create_win32_process(
+                WINVER_EXE_BYTES, WIN32_DLL_BYTES, "winver.exe", 0x400, 0x1550000, false,
+            )
+        }) {
+            Ok((_, thread)) => thread,
+            Err(status) => {
+                kprintln!("[PS] winver.exe launch failed: 0x{:08X}", status);
+                core::ptr::null_mut()
+            }
+        }
+    };
     kprintln!("[PureNT] Entering interactive Win32k Desktop & Mouse event loop...");
-
-    win32k::win32k_run_event_loop();
+    win32k::win32k_run_event_loop(cmd_thread, winver_thread);
 }
 
 static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows-msvc/debug/smss.exe");
+static DWM_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/dwm.exe");
+static CONHOST_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/conhost.exe");
 static CMD_EXE_BYTES: &[u8] = include_bytes!("../../../refs/win7_7601_x64/binaries/cmd.exe");
+static WINVER_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/winver.exe");
+static WINVER_MUI_BYTES: &[u8] = include_bytes!("../../../target/esp/winver.exe.mui");
 static WIN32_DLL_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows-msvc/debug/purent_win32.dll");
 
 unsafe extern "win64" fn worker_probe(_context: *mut core::ffi::c_void) {

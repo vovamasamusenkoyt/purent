@@ -10,6 +10,8 @@ pub mod ps;
 pub mod status;
 pub mod string;
 pub mod syscall;
+pub mod dialog;
+pub mod composition;
 
 pub use io::*;
 pub use kpcr::*;

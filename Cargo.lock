@@ -3,11 +3,25 @@
 version = 4
 
 [[package]]
+name = "conhost"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]
+
+[[package]]
 name = "purent-boot"
 version = "0.1.0"
 dependencies = [
  "purent-ntdef",
  "purent-pe",
+]
+
+[[package]]
+name = "purent-dwm"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
 ]
 
 [[package]]
@@ -35,6 +49,21 @@ name = "purent-pe"
 version = "0.1.0"
 dependencies = [
  "purent-ntdef",
+]
+
+[[package]]
+name = "purent-shell32"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]
+
+[[package]]
+name = "purent-user32"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+ "purent-pe",
 ]
 
 [[package]]

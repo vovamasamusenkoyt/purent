@@ -49,7 +49,7 @@ impl ConsoleWindow {
         Some(Self {
             window: Window::new(
                 0x1001,
-                "", // Clean Aero glass titlebar matching reference screenshot
+                "PureNT Console",
                 Rect::new(x, y, outer_w, outer_h),
             ),
             buffer: [[b' '; CONSOLE_COLS]; CONSOLE_ROWS],
@@ -145,19 +145,35 @@ impl ConsoleWindow {
         self.text_dirty = false;
     }
 
-    pub fn draw(&mut self, surface: &mut Surface) {
-        if self.window.is_minimized {
-            return;
-        }
+    pub fn text_rect(&self) -> Rect {
+        Rect::new(
+            self.window.rect.x + TEXT_X,
+            self.window.rect.y + TEXT_Y,
+            TEXT_WIDTH,
+            TEXT_HEIGHT,
+        )
+    }
+
+    pub fn draw_text_surface(&mut self, surface: &mut Surface) {
         if self.text_dirty {
             self.rasterize_text();
         }
 
+        let rect = self.text_rect();
+        // The console's pixel buffer is separate from the composition target.
+        unsafe { surface.blit_opaque(&self.text_surface, rect.x, rect.y) };
+    }
+
+    pub fn draw(&mut self, surface: &mut Surface, redirected: bool) {
+        if self.window.is_minimized {
+            return;
+        }
+
         let rx = self.window.rect.x;
         let ry = self.window.rect.y;
+        self.window.draw_glass(surface, redirected);
         self.window.draw_frame(surface);
-        // The console's pool allocation is separate from the framebuffer.
-        unsafe { surface.blit_opaque(&self.text_surface, rx + TEXT_X, ry + TEXT_Y) };
+        self.draw_text_surface(surface);
 
         // 5. Vertical Scrollbar (x = rx + 538..rx + 555, y = ry + 32..ry + 320)
         let vx = rx + 538;
