@@ -119,6 +119,12 @@ pub unsafe extern "win64" fn KiSwapContext(
         "jz 1f",
         "mov [rbx + 0x28], rax",
         "1:",
+        "push rsi",
+        "push rdi",
+        "mov rcx, rax",
+        "call {set_rsp0}",
+        "pop rdi",
+        "pop rsi",
 
         // 8. Update thread states: CurrentThread = Ready (1), NextThread = Running (2)
         "mov byte ptr [rdi + 0x49], 1",
@@ -159,6 +165,7 @@ pub unsafe extern "win64" fn KiSwapContext(
         // 12. Deallocate stack frame and return to thread's instruction stream!
         "add rsp, 0x138",
         "ret",
+        set_rsp0 = sym purent_hal::gdt::set_rsp0,
     );
 }
 

@@ -294,9 +294,9 @@ pub extern "efiapi" fn efi_main(
 
     unsafe {
         // Lower-half identity mapping: map all 512GB physical memory using 1GB huge pages in PDPT_low
-        *pml4.add(0) = (pdpt_low as u64) | 0x03; // PRESENT | WRITABLE
+        *pml4.add(0) = (pdpt_low as u64) | 0x07; // PRESENT | WRITABLE | USER
         for i in 0..512 {
-            *pdpt_low.add(i) = ((i as u64) * 0x40000000) | 0x83; // PRESENT | WRITABLE | 1GB HUGE PAGE
+            *pdpt_low.add(i) = ((i as u64) * 0x40000000) | 0x87; // PRESENT | WRITABLE | USER | 1GB HUGE PAGE
         }
 
         // Higher-half kernel mapping (0xFFFFF80000000000..0xFFFFF80040000000 = 1GB)

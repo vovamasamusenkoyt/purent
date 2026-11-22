@@ -49,8 +49,8 @@ pub unsafe fn init() {
     // 5. Set LVT Timer: Periodic mode (bit 17 = 0x20000) on Vector 0x20
     apic_write(APIC_REG_LVT_TIMER, 0x20020);
 
-    // 6. Initial counter value for periodic quantum ticks (smaller value for rapid initial ticks)
-    apic_write(APIC_REG_TIMER_INIT_COUNT, 0x100000);
+    // 6. Initial counter value for periodic quantum ticks
+    apic_write(APIC_REG_TIMER_INIT_COUNT, 0x20000);
 
     kprintln!("[APIC] Local APIC online (CPU ID: {}, Vector: 0x20, Mode: Periodic)", apic_id);
 }

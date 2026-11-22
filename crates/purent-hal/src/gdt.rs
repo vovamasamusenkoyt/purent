@@ -2,11 +2,12 @@
 
 use core::arch::asm;
 
-pub const KERNEL_CS: u16 = 0x08;
-pub const KERNEL_DS: u16 = 0x10;
-pub const USER_DS: u16 = 0x18 | 3;
-pub const USER_CS: u16 = 0x20 | 3;
-pub const TSS_SEL: u16 = 0x28;
+pub const KERNEL_CS: u16 = 0x10;
+pub const KERNEL_DS: u16 = 0x18;
+pub const USER_CS32: u16 = 0x20 | 3;
+pub const USER_DS: u16 = 0x28 | 3;
+pub const USER_CS: u16 = 0x30 | 3;
+pub const TSS_SEL: u16 = 0x40;
 
 #[repr(C, packed)]
 #[derive(Copy, Clone, Default)]
@@ -30,7 +31,7 @@ pub struct TaskStateSegment {
 
 #[repr(C, align(16))]
 pub struct Gdt {
-    entries: [u64; 7],
+    entries: [u64; 10],
 }
 
 #[repr(C, packed)]
@@ -60,12 +61,15 @@ static mut TSS: TaskStateSegment = TaskStateSegment {
 static mut GDT: Gdt = Gdt {
     entries: [
         0,                  // 0x00: Null
-        0x00AF9A000000FFFF, // 0x08: Kernel CS (64-bit, DPL 0, RX)
-        0x00CF92000000FFFF, // 0x10: Kernel DS (DPL 0, RW)
-        0x00CFF2000000FFFF, // 0x18: User DS (DPL 3, RW)
-        0x00AFFB000000FFFF, // 0x20: User CS (64-bit, DPL 3, RX)
-        0,                  // 0x28: TSS low (set at runtime)
-        0,                  // 0x30: TSS high
+        0,                  // 0x08: Reserved
+        0x00AF9A000000FFFF, // 0x10: Kernel CS (64-bit, DPL 0, RX)
+        0x00CF92000000FFFF, // 0x18: Kernel DS (DPL 0, RW)
+        0x00CFFA000000FFFF, // 0x20: User CS (32-bit compat, DPL 3, RX)
+        0x00CFF2000000FFFF, // 0x28: User DS (64-bit, DPL 3, RW)
+        0x00AFFA000000FFFF, // 0x30: User CS (64-bit, DPL 3, RX)
+        0,                  // 0x38: Reserved / TEB
+        0,                  // 0x40: TSS low (set at runtime)
+        0,                  // 0x48: TSS high
     ],
 };
 
@@ -82,8 +86,8 @@ pub unsafe fn init() {
     // TSS descriptor high
     let tss_high = tss_ptr >> 32;
 
-    GDT.entries[5] = tss_low;
-    GDT.entries[6] = tss_high;
+    GDT.entries[8] = tss_low;
+    GDT.entries[9] = tss_high;
 
     let gdtr = GdtDescriptor {
         size: (core::mem::size_of::<Gdt>() - 1) as u16,
@@ -113,6 +117,6 @@ pub unsafe fn init() {
     );
 }
 
-pub unsafe fn set_rsp0(rsp: u64) {
+pub unsafe extern "win64" fn set_rsp0(rsp: u64) {
     TSS.rsp0 = rsp;
 }

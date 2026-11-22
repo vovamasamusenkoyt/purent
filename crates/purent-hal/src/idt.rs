@@ -30,7 +30,7 @@ impl IdtEntry {
     }
 
     pub fn set_handler(&mut self, handler: usize) {
-        self.selector = 0x08; // KERNEL_CS
+        self.selector = crate::gdt::KERNEL_CS;
         self.ist = 0;
         self.type_attr = 0x8E; // Present, Ring 0, 64-bit Interrupt Gate
         self.offset_low = handler as u16;
@@ -170,7 +170,16 @@ interrupt_stub_err!(asm_page_fault, 0x0E);
 unsafe extern "C" fn asm_apic_timer() {
     naked_asm!(
         "push rax", "push rcx", "push rdx", "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
+        // Check if interrupted from Ring 3 (CS at [rsp + 9 * 8 + 8] = [rsp + 0x50])
+        "test byte ptr [rsp + 0x50], 3",
+        "jz 1f",
+        "swapgs",
+        "1:",
         "call apic_timer_handler",
+        "test byte ptr [rsp + 0x50], 3",
+        "jz 2f",
+        "swapgs",
+        "2:",
         "pop r11", "pop r10", "pop r9", "pop r8", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rax",
         "iretq",
     );

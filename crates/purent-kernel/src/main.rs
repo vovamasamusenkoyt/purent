@@ -95,8 +95,9 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     // 5. Object Manager initialization
     ob_init();
 
-    // 6. Thread Scheduler initialization
+    // 6. Thread Scheduler and Fast System Call initialization
     ke::sched_init();
+    ke::syscall_init();
     purent_hal::register_tick_callback(ke::ki_quantum_end);
 
     // 7. Local APIC and Timer initialization
@@ -173,20 +174,49 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     }
     kprintln!("--- [STAGE COMPLETE: NT SYSTEM CALLS VERIFIED] ---\n");
 
-    // 9. Multi-threading and Preemptive Scheduler Verification
-    kprintln!("\n--- [STAGE: MULTI-THREADING & PREEMPTIVE SCHEDULING] ---");
+    // 9. Multi-threading, Ring 3 User-Mode, and Preemptive Scheduler Verification
+    kprintln!("\n--- [STAGE: MULTI-THREADING & RING 3 USER-MODE EXECUTION] ---");
     let thread1 = ke::ps_create_system_thread(worker_thread_1, 1 as *mut _, "KernelWorker-1");
     let thread2 = ke::ps_create_system_thread(worker_thread_2, 2 as *mut _, "KernelWorker-2");
+    let user_th = ke::ps_create_system_thread(user_mode_thread, core::ptr::null_mut(), "Userland-Ring3");
 
-    if thread1.is_ok() && thread2.is_ok() {
-        kprintln!("[KE] Threads dispatched into Ready Queue. Yielding to worker threads...");
+    if thread1.is_ok() && thread2.is_ok() && user_th.is_ok() {
+        kprintln!("[KE] Kernel workers and Ring 3 user thread dispatched into Ready Queue. Yielding...");
         ke::ki_yield();
     }
-    kprintln!("--- [STAGE COMPLETE: PREEMPTIVE THREADING ACTIVE] ---\n");
+    kprintln!("--- [STAGE COMPLETE: PREEMPTIVE THREADING & USER-MODE ACTIVE] ---\n");
 
     kprintln!("[PureNT] System idle. All subsystems operational.");
 
     hlt_loop();
+}
+
+static USER_PAYLOAD: [u8; 41] = [
+    0x49, 0xC7, 0xC2, 0x77, 0x77, 0x00, 0x00, // mov r10, 0x7777
+    0xB8, 0x0C, 0x00, 0x00, 0x00,             // mov eax, 0x0C (NtClose)
+    0x0F, 0x05,                               // syscall
+    0xB8, 0x43, 0x00, 0x00, 0x00,             // mov eax, 0x43 (NtYieldExecution)
+    0x0F, 0x05,                               // syscall
+    0x49, 0xC7, 0xC2, 0xFF, 0xFF, 0xFF, 0xFF, // mov r10, -1 (CurrentProcess)
+    0x31, 0xD2,                               // xor edx, edx
+    0xB8, 0x29, 0x00, 0x00, 0x00,             // mov eax, 0x29 (NtTerminateProcess)
+    0x0F, 0x05,                               // syscall
+    0xF3, 0x90,                               // pause
+    0xEB, 0xFC,                               // jmp spin
+];
+
+unsafe extern "win64" fn user_mode_thread(_context: *mut core::ffi::c_void) {
+    kprintln!("[USER-THREAD] Allocating User-Mode memory pages (U/S = 1) in lower-half...");
+    let code_page = crate::nt::mm::PMM.lock().allocate_frame().expect("User code frame");
+    let stack_page = crate::nt::mm::PMM.lock().allocate_frame().expect("User stack frame");
+
+    let code_ptr = code_page as *mut u8;
+    core::ptr::copy_nonoverlapping(USER_PAYLOAD.as_ptr(), code_ptr, USER_PAYLOAD.len());
+
+    let stack_top = (stack_page + 4096 - 0x80) & !0xFu64;
+    kprintln!("[USER-THREAD] Staged 41-byte native Win7 syscall payload at 0x{:016X}", code_page);
+    kprintln!("[USER-THREAD] Transitioning to Ring 3 via iretq (CS=0x33, SS=0x2B, RSP=0x{:016X})...", stack_top);
+    ke::enter_user_mode(code_page, stack_top);
 }
 
 unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
