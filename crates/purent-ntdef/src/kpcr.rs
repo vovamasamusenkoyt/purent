@@ -50,7 +50,9 @@ pub struct KThread {
     pub wait_mode: i8,                          // 0x4C
     pub padding_1: [u8; 0x23],                  // 0x4D..0x70
     pub process: *mut KProcess,                 // 0x70 (Owner Process)
-    pub padding_2: [u8; 0xC0],                  // 0x78..0x138
+    pub padding_2a: [u8; 0x40],                 // 0x78..0x0B8
+    pub teb: *mut core::ffi::c_void,            // 0x0B8 (TEB pointer, matching Win7 x64!)
+    pub padding_2b: [u8; 0x78],                 // 0x0C0..0x138
     pub context_switches: u32,                  // 0x138
     pub priority: i8,                           // 0x13C
     pub base_priority: i8,                      // 0x13D
@@ -95,3 +97,12 @@ pub struct Kprcb {
     pub dpc_routine_active: u8,                   // 0x30 (0x1B0 in KPCR)
     pub padding_2: [u8; 0x1000],                  // rest of PRCB
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(KThread, initial_stack) == 0x28);
+    assert!(core::mem::offset_of!(KThread, kernel_stack) == 0x38);
+    assert!(core::mem::offset_of!(KThread, process) == 0x70);
+    assert!(core::mem::offset_of!(KThread, teb) == 0x0B8);
+    assert!(core::mem::offset_of!(KThread, context_switches) == 0x138);
+};
+

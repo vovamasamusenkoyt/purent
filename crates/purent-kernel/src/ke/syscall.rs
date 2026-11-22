@@ -244,31 +244,26 @@ pub extern "win64" fn ki_system_call_dispatch(
 }
 
 /// Transition from Ring 0 (Kernel) to Ring 3 (User-Mode) via `iretq`
-/// Sets up user stack, user code selector (0x33), user data selector (0x2B), and drops CPL to 3.
-pub unsafe fn enter_user_mode(entry_point: u64, user_stack: u64) -> ! {
-    kprintln!("[KE] Entering User-Mode (Ring 3) at RIP=0x{:016X}, RSP=0x{:016X}...", entry_point, user_stack);
+/// Sets up user stack, user code selector (0x33), user data selector (0x2B), user TEB via swapgs, and drops CPL to 3.
+pub unsafe fn enter_user_mode(entry_point: u64, user_stack: u64, teb: u64) -> ! {
+    kprintln!("[KE] Entering User-Mode (Ring 3) at RIP=0x{:016X}, RSP=0x{:016X}, TEB=0x{:016X}...", entry_point, user_stack, teb);
 
-    // Swap GS base: put KPCR into IA32_KERNEL_GS_BASE so the first Ring 3 syscall can swapgs it back!
-    let kpcr_ptr = purent_hal::cpu::rdmsr(purent_hal::cpu::IA32_GS_BASE);
-    wrmsr(IA32_KERNEL_GS_BASE, kpcr_ptr);
-    wrmsr(purent_hal::cpu::IA32_GS_BASE, 0); // Clear user GS base
+    // 1. Put user TEB into IA32_KERNEL_GS_BASE
+    wrmsr(IA32_KERNEL_GS_BASE, teb);
 
-    // Execute iretq with:
-    // [rsp + 0x00] = RIP
-    // [rsp + 0x08] = CS (0x30 | 3 = 0x33)
-    // [rsp + 0x10] = RFLAGS (0x202 = IF enabled)
-    // [rsp + 0x18] = RSP (user_stack)
-    // [rsp + 0x20] = SS (0x28 | 3 = 0x2B)
+    // 2. Execute swapgs so IA32_GS_BASE becomes TEB and IA32_KERNEL_GS_BASE becomes KPCR!
+    // 3. Execute iretq into Ring 3!
     core::arch::asm!(
         "mov ax, 0x2B",
         "mov ds, ax",
         "mov es, ax",
         "mov fs, ax",
-        "push 0x2B",         // SS
-        "push {0}",          // RSP
+        "swapgs",            // Swap GS: IA32_GS_BASE = user TEB, IA32_KERNEL_GS_BASE = KPCR
+        "push 0x2B",         // SS (0x28 | 3)
+        "push {0}",          // RSP (user_stack)
         "push 0x202",        // RFLAGS (IF=1)
-        "push 0x33",         // CS
-        "push {1}",          // RIP
+        "push 0x33",         // CS (0x30 | 3)
+        "push {1}",          // RIP (entry_point)
         "iretq",
         in(reg) user_stack,
         in(reg) entry_point,

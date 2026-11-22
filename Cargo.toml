@@ -6,6 +6,7 @@ members = [
     "crates/purent-boot",
     "crates/purent-hal",
     "crates/purent-kernel",
+    "crates/apps/smss",
     "xtask",
 ]
 

@@ -5,6 +5,7 @@ pub mod kpcr;
 pub mod list;
 pub mod loader;
 pub mod object;
+pub mod ps;
 pub mod status;
 pub mod string;
 
@@ -13,5 +14,6 @@ pub use kpcr::*;
 pub use list::*;
 pub use loader::*;
 pub use object::*;
+pub use ps::*;
 pub use status::*;
 pub use string::*;

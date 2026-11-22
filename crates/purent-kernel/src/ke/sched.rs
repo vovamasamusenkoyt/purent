@@ -31,7 +31,9 @@ pub static mut BOOT_THREAD: KThread = KThread {
     wait_mode: 0,
     padding_1: [0; 0x23],
     process: core::ptr::null_mut(),
-    padding_2: [0; 0xC0],
+    padding_2a: [0; 0x40],
+    teb: core::ptr::null_mut(),
+    padding_2b: [0; 0x78],
     context_switches: 0,
     priority: 8,
     base_priority: 8,
@@ -141,7 +143,18 @@ pub unsafe extern "win64" fn KiSwapContext(
         "mov cr3, rdx",
         "2:",
 
-        // 10. Restore GPRs from new thread's stack
+        // 10. Update IA32_KERNEL_GS_BASE if NextThread has a TEB (offset 0xB8)
+        "mov r8, [rsi + 0x0B8]",
+        "test r8, r8",
+        "jz 3f",
+        "mov ecx, 0xC0000102",
+        "mov eax, r8d",
+        "shr r8, 32",
+        "mov edx, r8d",
+        "wrmsr",
+        "3:",
+
+        // 11. Restore GPRs from new thread's stack
         "mov rbx, [rsp + 0x100]",
         "mov rdi, [rsp + 0x108]",
         "mov rsi, [rsp + 0x110]",

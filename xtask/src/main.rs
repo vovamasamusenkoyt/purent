@@ -16,7 +16,29 @@ fn build() {
     let boot_dir = esp_dir.join("EFI/BOOT");
     fs::create_dir_all(&boot_dir).expect("Failed to create ESP directory");
 
-    println!("==> [PureNT xtask] 1. Building purent-kernel (x86_64-pc-windows-msvc) as purentoskrnl.exe...");
+    println!("==> [PureNT xtask] 1. Building User-Mode native subsystem (smss.exe)...");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .env(
+            "RUSTFLAGS",
+            "-C linker=lld-link -C link-arg=/entry:main -C link-arg=/subsystem:native -C link-arg=/base:0x0000000000400000 -C link-arg=/nodefaultlib",
+        )
+        .args([
+            "build",
+            "--package",
+            "smss",
+            "--target",
+            "x86_64-pc-windows-msvc",
+        ])
+        .status()
+        .expect("Failed to build smss");
+    assert!(status.success(), "smss build failed");
+
+    let smss_binary = root.join("target/x86_64-pc-windows-msvc/debug/smss.exe");
+    let dest_smss = esp_dir.join("smss.exe");
+    fs::copy(&smss_binary, &dest_smss).expect("Failed to copy smss.exe");
+
+    println!("==> [PureNT xtask] 2. Building purent-kernel (x86_64-pc-windows-msvc) as purentoskrnl.exe...");
     let status = Command::new("cargo")
         .current_dir(&root)
         .env(
@@ -38,7 +60,7 @@ fn build() {
     let dest_kernel = esp_dir.join("purentoskrnl.exe");
     fs::copy(&kernel_binary, &dest_kernel).expect("Failed to copy purentoskrnl.exe");
 
-    println!("==> [PureNT xtask] 2. Building purent-boot (x86_64-unknown-uefi)...");
+    println!("==> [PureNT xtask] 3. Building purent-boot (x86_64-unknown-uefi)...");
     let status = Command::new("cargo")
         .current_dir(&root)
         .args([
