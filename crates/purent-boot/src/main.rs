@@ -371,6 +371,28 @@ pub extern "efiapi" fn efi_main(
                                 let gop = gop_ptr as *mut EfiGraphicsOutputProtocol;
                                 let mode = (*gop).mode;
                                 if !mode.is_null() {
+                                    // Query available modes and switch to 1280x720 if supported
+                                    let qm_fn: unsafe extern "efiapi" fn(*mut EfiGraphicsOutputProtocol, u32, *mut usize, *mut *mut EfiGraphicsOutputModeInformation) -> usize =
+                                        core::mem::transmute((*gop).query_mode);
+                                    let sm_fn: unsafe extern "efiapi" fn(*mut EfiGraphicsOutputProtocol, u32) -> usize =
+                                        core::mem::transmute((*gop).set_mode);
+
+                                    for m in 0..(*mode).max_mode {
+                                        let mut info_size = 0usize;
+                                        let mut info_ptr: *mut EfiGraphicsOutputModeInformation = core::ptr::null_mut();
+                                        if qm_fn(gop, m, &mut info_size, &mut info_ptr) == 0 && !info_ptr.is_null() {
+                                            let mw = (*info_ptr).horizontal_resolution;
+                                            let mh = (*info_ptr).vertical_resolution;
+                                            if mw == 1280 && mh == 720 {
+                                                serial_print("[BOOT] Switching GOP to 1280x720 (Mode ");
+                                                print_hex_u64(m as u64);
+                                                serial_print(")\n");
+                                                sm_fn(gop, m);
+                                                break;
+                                            }
+                                        }
+                                    }
+
                                     let info = (*mode).info;
                                     let fb_base = (*mode).frame_buffer_base;
                                     let fb_size = (*mode).frame_buffer_size;

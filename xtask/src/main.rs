@@ -117,7 +117,7 @@ fn run() {
     let uefi_binary = esp_dir.join("EFI/BOOT/BOOTX64.EFI");
     let ovmf_path = "/usr/share/edk2/x64/OVMF.4m.fd";
 
-    println!("==> [PureNT xtask] Starting QEMU with UEFI (OVMF)...");
+    println!("==> [PureNT xtask] Starting QEMU with UEFI (OVMF) in 1280x720...");
     let status = Command::new("qemu-system-x86_64")
         .args([
             "-bios",
@@ -126,14 +126,14 @@ fn run() {
             uefi_binary.to_str().unwrap(),
             "-drive",
             &format!("format=raw,file=fat:rw:{}", esp_dir.display()),
-            "-vga",
-            "std",
+            "-device",
+            "VGA,edid=on,xres=1280,yres=720",
             "-serial",
             "stdio",
             "-m",
             "512M",
             "-display",
-            "none",
+            "gtk",
         ])
         .status()
         .expect("Failed to execute QEMU");
@@ -164,8 +164,8 @@ fn screenshot() {
             uefi_binary.to_str().unwrap(),
             "-drive",
             &format!("format=raw,file=fat:rw:{}", esp_dir.display()),
-            "-vga",
-            "std",
+            "-device",
+            "VGA,edid=on,xres=1280,yres=720",
             "-display",
             "none",
             "-serial",
