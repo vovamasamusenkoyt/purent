@@ -223,9 +223,9 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     kprintln!("[POOL-TEST] Reclamation probe complete: stack memory verified safe for reuse.");
 
     kprintln!("\n--- [STAGE COMPLETE: ALL THREADS TERMINATED & REAPED CLEANLY] ---");
-    kprintln!("[PureNT] System idle. All subsystems operational.");
+    kprintln!("[PureNT] Entering interactive Win32k Desktop & Mouse event loop...");
 
-    hlt_loop();
+    win32k::win32k_run_event_loop();
 }
 
 static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows-msvc/debug/smss.exe");
