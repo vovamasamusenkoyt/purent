@@ -3,7 +3,7 @@
 
 use purent_ntdef::syscall::{
     nt_current_peb_address, nt_current_teb_address, nt_syscall0, nt_syscall1, nt_syscall2,
-    nt_syscall4, nt_syscall5, nt_syscall6,
+    nt_syscall4, nt_syscall5, nt_syscall6, nt_syscall7, nt_syscall10,
 };
 
 #[panic_handler]
@@ -69,9 +69,15 @@ const SYSCALL_NT_CLOSE: u64 = 0x0C;
 const SYSCALL_NT_ALLOCATE_VIRTUAL_MEMORY: u64 = 0x15;
 const SYSCALL_NT_FREE_VIRTUAL_MEMORY: u64 = 0x1B;
 const SYSCALL_NT_QUERY_VIRTUAL_MEMORY: u64 = 0x20;
+const SYSCALL_NT_MAP_VIEW_OF_SECTION: u64 = 0x25;
+const SYSCALL_NT_UNMAP_VIEW_OF_SECTION: u64 = 0x27;
 const SYSCALL_NT_TERMINATE_PROCESS: u64 = 0x29;
 const SYSCALL_NT_YIELD_EXECUTION: u64 = 0x43;
+const SYSCALL_NT_CREATE_SECTION: u64 = 0x47;
 const SYSCALL_NT_PROTECT_VIRTUAL_MEMORY: u64 = 0x4D;
+
+const SEC_COMMIT: u32 = 0x08000000;
+const SECTION_ALL_ACCESS: u32 = 0x000F001F;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -273,8 +279,54 @@ pub unsafe extern "C" fn main() -> ! {
         let _ = nt_free_virtual_memory(0, &mut high_base, &mut high_size, MEM_RELEASE);
     }
 
-    // 8. Test NtTerminateProcess syscall (0x29) with ExitStatus 0 if PEB and VMM verified
-    let exit_status = if os_major == 6 && os_build == 7601 && mem_verified && high_verified {
+    // Test C: Section Object (NtCreateSection & NtMapViewOfSection)
+    let mut sec_handle: usize = 0;
+    let mut sec_size: i64 = 65536; // 64 KiB
+    let st_sec_create = nt_syscall7(
+        SYSCALL_NT_CREATE_SECTION,
+        &mut sec_handle as *mut _ as u64,
+        SECTION_ALL_ACCESS as u64,
+        0,
+        &mut sec_size as *mut _ as u64,
+        PAGE_READWRITE as u64,
+        SEC_COMMIT as u64,
+        0,
+    );
+
+    let mut sec_view_base: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut sec_view_size: usize = 0;
+    let st_sec_map = nt_syscall10(
+        SYSCALL_NT_MAP_VIEW_OF_SECTION,
+        sec_handle as u64,
+        0,
+        &mut sec_view_base as *mut _ as u64,
+        0,
+        0,
+        0,
+        &mut sec_view_size as *mut _ as u64,
+        1,
+        0,
+        PAGE_READWRITE as u64,
+    );
+
+    let mut sec_verified = st_sec_create == 0 && st_sec_map == 0 && !sec_view_base.is_null();
+    if sec_verified {
+        let ptr = sec_view_base as *mut u8;
+        let sec_magic = b"PureNT-SectionObject-ViewMapped-OK!";
+        for i in 0..sec_magic.len() {
+            *ptr.add(i) = sec_magic[i];
+        }
+        for i in 0..sec_magic.len() {
+            if *ptr.add(i) != sec_magic[i] {
+                sec_verified = false;
+            }
+        }
+        let _ = nt_syscall2(SYSCALL_NT_UNMAP_VIEW_OF_SECTION, 0, sec_view_base as u64);
+        let _ = nt_syscall1(SYSCALL_NT_CLOSE, sec_handle as u64);
+    }
+
+    // 8. Test NtTerminateProcess syscall (0x29) with ExitStatus 0 if PEB, VMM, and Sections verified
+    let exit_status = if os_major == 6 && os_build == 7601 && mem_verified && high_verified && sec_verified {
         0x00000000u32
     } else {
         0xC0000001u32

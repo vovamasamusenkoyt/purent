@@ -216,6 +216,77 @@ pub extern "win64" fn ki_system_call_dispatch(frame: &mut TrapFrame) {
             st
         },
 
+        SYSCALL_NT_CREATE_SECTION => unsafe {
+            let section_handle = a1 as *mut usize;
+            let desired_access = a2 as u32;
+            let obj_attr = a3 as *mut ObjectAttributes;
+            let max_size = a4 as *mut i64;
+            let sec_protect: u32 = frame.arg5();
+            let alloc_attr: u32 = frame.arg6();
+            let file_handle: usize = frame.arg7();
+
+            let st = crate::mm::ZwCreateSection(
+                section_handle,
+                desired_access,
+                obj_attr,
+                max_size,
+                sec_protect,
+                alloc_attr,
+                file_handle,
+            );
+            kprintln!(
+                "[SYSCALL] NtCreateSection(Handle=0x{:X}, Protect=0x{:X}, Attr=0x{:X}) -> 0x{:08X}",
+                if !section_handle.is_null() { *section_handle } else { 0 },
+                sec_protect,
+                alloc_attr,
+                st
+            );
+            st
+        },
+
+        SYSCALL_NT_MAP_VIEW_OF_SECTION => unsafe {
+            let section_handle = a1 as usize;
+            let process_handle = a2 as usize;
+            let base_address = a3 as *mut *mut core::ffi::c_void;
+            let zero_bits = a4 as usize;
+            let commit_size: usize = frame.arg5();
+            let section_offset: *mut i64 = frame.arg6();
+            let view_size: *mut usize = frame.arg7();
+            let inherit_disp: u32 = frame.arg8();
+            let alloc_type: u32 = *(frame.rsp.wrapping_add(0x48) as *const u32);
+            let win32_protect: u32 = *(frame.rsp.wrapping_add(0x50) as *const u32);
+
+            let st = crate::mm::ZwMapViewOfSection(
+                section_handle,
+                process_handle,
+                base_address,
+                zero_bits,
+                commit_size,
+                section_offset,
+                view_size,
+                inherit_disp,
+                alloc_type,
+                win32_protect,
+            );
+            kprintln!(
+                "[SYSCALL] NtMapViewOfSection(Sect=0x{:X}, Base=0x{:p}, Size=0x{:X}, Prot=0x{:X}) -> 0x{:08X}",
+                section_handle,
+                if !base_address.is_null() { *base_address } else { core::ptr::null_mut() },
+                if !view_size.is_null() { *view_size } else { 0 },
+                win32_protect,
+                st
+            );
+            st
+        },
+
+        SYSCALL_NT_UNMAP_VIEW_OF_SECTION => unsafe {
+            let process_handle = a1 as usize;
+            let base_address = a2 as *mut core::ffi::c_void;
+            let st = crate::mm::ZwUnmapViewOfSection(process_handle, base_address);
+            kprintln!("[SYSCALL] NtUnmapViewOfSection(Proc=0x{:X}, Base=0x{:p}) -> 0x{:08X}", process_handle, base_address, st);
+            st
+        },
+
         SYSCALL_NT_YIELD_EXECUTION => {
             kprintln!("[SYSCALL] NtYieldExecution called from Ring 3 - yielding CPU quantum...");
             unsafe { crate::ke::ki_yield(); }

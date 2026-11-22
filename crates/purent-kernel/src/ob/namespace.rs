@@ -44,6 +44,12 @@ pub static mut OB_TYPE_FILE: ObjectType = ObjectType {
     total_number_of_handles: 0,
 };
 
+pub static mut OB_TYPE_SECTION: ObjectType = ObjectType {
+    name: "Section",
+    total_number_of_objects: 0,
+    total_number_of_handles: 0,
+};
+
 #[repr(C)]
 pub struct ObjectHeader {
     pub pointer_count: i64,

@@ -203,6 +203,80 @@ pub unsafe fn nt_syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, 
 }
 
 #[inline(always)]
+pub unsafe fn nt_syscall7(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64, a7: u64) -> NtStatus {
+    let status: i32;
+    core::arch::asm!(
+        "sub rsp, 0x40",
+        "mov qword ptr [rsp + 0x28], {a5}",
+        "mov qword ptr [rsp + 0x30], {a6}",
+        "mov qword ptr [rsp + 0x38], {a7}",
+        "mov r10, {a1}",
+        "mov eax, {nr:e}",
+        "syscall",
+        "add rsp, 0x40",
+        nr = in(reg) nr,
+        a1 = in(reg) a1,
+        in("rdx") a2,
+        in("r8") a3,
+        in("r9") a4,
+        a5 = in(reg) a5,
+        a6 = in(reg) a6,
+        a7 = in(reg) a7,
+        lateout("rax") status,
+        out("rcx") _,
+        out("r11") _,
+        out("r10") _,
+    );
+    status
+}
+
+#[inline(always)]
+pub unsafe fn nt_syscall10(
+    nr: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+    a7: u64,
+    a8: u64,
+    a9: u64,
+    a10: u64,
+) -> NtStatus {
+    let status: i32;
+    core::arch::asm!(
+        "sub rsp, 0x60",
+        "mov qword ptr [rsp + 0x28], {a5}",
+        "mov qword ptr [rsp + 0x30], {a6}",
+        "mov qword ptr [rsp + 0x38], {a7}",
+        "mov qword ptr [rsp + 0x40], {a8}",
+        "mov qword ptr [rsp + 0x48], {a9}",
+        "mov qword ptr [rsp + 0x50], {a10}",
+        "mov r10, {a1}",
+        "mov eax, {nr:e}",
+        "syscall",
+        "add rsp, 0x60",
+        nr = in(reg) nr,
+        a1 = in(reg) a1,
+        in("rdx") a2,
+        in("r8") a3,
+        in("r9") a4,
+        a5 = in(reg) a5,
+        a6 = in(reg) a6,
+        a7 = in(reg) a7,
+        a8 = in(reg) a8,
+        a9 = in(reg) a9,
+        a10 = in(reg) a10,
+        lateout("rax") status,
+        out("rcx") _,
+        out("r11") _,
+        out("r10") _,
+    );
+    status
+}
+
+#[inline(always)]
 pub unsafe fn nt_current_teb_address() -> usize {
     let teb: usize;
     core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(pure, nomem, nostack));
