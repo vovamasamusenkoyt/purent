@@ -12,21 +12,11 @@ fn project_root() -> PathBuf {
 
 fn build() {
     let root = project_root();
-    println!("==> [PureNT xtask] Building purent-boot (x86_64-unknown-uefi)...");
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .args([
-            "build",
-            "--package",
-            "purent-boot",
-            "--target",
-            "x86_64-unknown-uefi",
-        ])
-        .status()
-        .expect("Failed to build purent-boot");
-    assert!(status.success(), "purent-boot build failed");
+    let esp_dir = root.join("target/esp");
+    let boot_dir = esp_dir.join("EFI/BOOT");
+    fs::create_dir_all(&boot_dir).expect("Failed to create ESP directory");
 
-    println!("==> [PureNT xtask] Building purent-kernel (x86_64-unknown-none)...");
+    println!("==> [PureNT xtask] 1. Building purent-kernel (x86_64-unknown-none)...");
     let status = Command::new("cargo")
         .current_dir(&root)
         .args([
@@ -40,18 +30,27 @@ fn build() {
         .expect("Failed to build purent-kernel");
     assert!(status.success(), "purent-kernel build failed");
 
-    // Prepare ESP (EFI System Partition) directory
-    let esp_dir = root.join("target/esp");
-    let boot_dir = esp_dir.join("EFI/BOOT");
-    fs::create_dir_all(&boot_dir).expect("Failed to create ESP directory");
+    let kernel_binary = root.join("target/x86_64-unknown-none/debug/purentoskrnl");
+    let dest_kernel = esp_dir.join("purentoskrnl.exe");
+    fs::copy(&kernel_binary, &dest_kernel).expect("Failed to copy purentoskrnl.exe");
+
+    println!("==> [PureNT xtask] 2. Building purent-boot (x86_64-unknown-uefi)...");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args([
+            "build",
+            "--package",
+            "purent-boot",
+            "--target",
+            "x86_64-unknown-uefi",
+        ])
+        .status()
+        .expect("Failed to build purent-boot");
+    assert!(status.success(), "purent-boot build failed");
 
     let uefi_binary = root.join("target/x86_64-unknown-uefi/debug/purent-boot.efi");
     let bootx64 = boot_dir.join("BOOTX64.EFI");
     fs::copy(&uefi_binary, &bootx64).expect("Failed to copy BOOTX64.EFI");
-
-    let kernel_binary = root.join("target/x86_64-unknown-none/debug/purentoskrnl");
-    let dest_kernel = esp_dir.join("purentoskrnl.exe");
-    fs::copy(&kernel_binary, &dest_kernel).expect("Failed to copy purentoskrnl.exe");
 
     println!("==> [PureNT xtask] ESP disk staged at {}", esp_dir.display());
 }

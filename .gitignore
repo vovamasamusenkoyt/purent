@@ -1,4 +1,7 @@
 target/
+refs/
 **/*.rs.bk
 *.ppm
 *.log
+*.wim
+*.iso
