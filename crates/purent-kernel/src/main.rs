@@ -8,7 +8,9 @@ use core::panic::PanicInfo;
 use purent_hal::{gdt, hlt_loop, kprintln, serial::SERIAL1};
 use purent_ntdef::kpcr::{Kpcr, Kprcb, NtTib};
 use purent_ntdef::loader::{PureNtLoaderBlock, PURENT_LOADER_MAGIC};
+use purent_ntdef::object::{GENERIC_READ, GENERIC_WRITE};
 use crate::nt::mm::{pmm_init, pool_init};
+use crate::nt::ob::{ob_create_handle, ob_init, ob_reference_object_by_name};
 
 static mut BOOT_KPCR: Kpcr = Kpcr {
     nt_tib: NtTib {
@@ -64,36 +66,58 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
         hlt_loop();
     }
 
+    // 2. Hardware initialization (GDT, TSS, IDT)
     kprintln!("[HAL] Initializing GDT and Task State Segment...");
     gdt::init();
 
-    // Initialize KPCR on GS base
+    kprintln!("[HAL] Initializing Interrupt Descriptor Table (IDT)...");
+    purent_hal::idt_init();
+
+    // 3. Initialize KPCR on GS base
     BOOT_KPCR.prcb = &raw mut BOOT_KPCR.prcb_data;
     BOOT_KPCR.nt_tib.self_ptr = &raw mut BOOT_KPCR.nt_tib;
     purent_hal::cpu::wrmsr(purent_hal::cpu::IA32_GS_BASE, &raw mut BOOT_KPCR as u64);
     kprintln!("[KE] Processor Control Region (KPCR) active at 0x{:016X}", &raw const BOOT_KPCR as usize);
 
-    kprintln!("[BOOT] Loader block verified at 0x{:016X}", loader_block as usize);
     kprintln!("[BOOT] Kernel physical base: 0x{:016X}", ldr.kernel_physical_base);
     kprintln!("[BOOT] Kernel virtual base:  0xFFFFF80000200000");
-    kprintln!("[BOOT] Kernel size:          {} KiB", ldr.kernel_size / 1024);
 
-    // Initialize Physical Memory Manager (PMM)
+    // 4. Memory management
     pmm_init(ldr);
-
-    // Initialize NonPagedPool (Dynamic Kernel Heap)
     pool_init();
 
-    kprintln!("[EX] Object Manager (Ob) initialized.");
+    // 5. Object Manager initialization
+    ob_init();
+
+    // 6. Local APIC and Timer initialization
+    purent_hal::apic_init();
+    kprintln!("[HAL] Enabling CPU interrupts (sti)...");
+    core::arch::asm!("sti", options(nomem, nostack));
+
     kprintln!("[IO] I/O Manager (Io) initialized.");
 
+    // 7. Load native binary driver (null.sys)
     kprintln!("\n--- [STAGE: LOADING NATIVE BINARY DRIVER] ---");
     let loaded = loader::load_null_driver();
     if loaded {
         kprintln!("--- [STAGE COMPLETE: NATIVE DRIVER ACTIVE] ---\n");
 
-        // Execute synthetic IRP dispatch loop against null.sys
+        // 8. Execute synthetic IRP dispatch loop against null.sys
         loader::test_driver_io();
+
+        // 9. Object Manager lookup & Handle creation test
+        kprintln!("\n--- [STAGE: OBJECT MANAGER LOOKUP & HANDLES] ---");
+        match ob_reference_object_by_name("\\Device\\Null") {
+            Ok(hdr) => {
+                kprintln!("[OB-TEST] Found object in namespace: \"{}\"", (*hdr).name_str());
+                let handle = ob_create_handle(hdr, GENERIC_READ | GENERIC_WRITE);
+                kprintln!("[OB-TEST] Successfully opened HANDLE 0x{:X} to \\Device\\Null!", handle);
+            }
+            Err(e) => {
+                kprintln!("[OB-TEST] Failed to lookup \\Device\\Null: 0x{:08X}", e);
+            }
+        }
+        kprintln!("--- [STAGE COMPLETE: OBJECT MANAGER VERIFIED] ---\n");
     } else {
         kprintln!("--- [STAGE FAILED] ---\n");
     }

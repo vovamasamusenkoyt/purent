@@ -1,10 +1,12 @@
-//! NT Kernel Executive Services (Rtl, Io, Mm, Ke)
+//! NT Kernel Executive Services (Rtl, Io, Mm, Ke, Ob)
 
 pub mod io;
 pub mod mm;
+pub mod ob;
 
 pub use io::*;
 pub use mm::*;
+pub use ob::*;
 
 use purent_hal::kprintln;
 use purent_ntdef::{
@@ -80,7 +82,22 @@ pub unsafe extern "win64" fn IoCreateDevice(
     }
 
     if !device_name.is_null() && !(*device_name).buffer.is_null() {
-        kprintln!("[IO] IoCreateDevice: registered device type 0x{:X} at 0x{:p} (allocated from NonPagedPool)", device_type, dev_ptr);
+        let u16_slice = core::slice::from_raw_parts((*device_name).buffer, ((*device_name).length / 2) as usize);
+        let mut name_buf = [0u8; 64];
+        let mut idx = 0;
+        for &ch in u16_slice {
+            if idx < 63 {
+                name_buf[idx] = ch as u8;
+                idx += 1;
+            }
+        }
+        let full_name = core::str::from_utf8_unchecked(&name_buf[..idx]);
+        let short_name = if full_name.starts_with("\\Device\\") {
+            &full_name["\\Device\\".len()..]
+        } else {
+            full_name
+        };
+        ob_insert_device(dev_ptr as *mut u8, short_name);
     } else {
         kprintln!("[IO] IoCreateDevice: anonymous device created at 0x{:p}", dev_ptr);
     }
