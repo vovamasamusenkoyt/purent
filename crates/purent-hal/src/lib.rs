@@ -9,5 +9,5 @@ pub mod serial;
 pub use apic::init as apic_init;
 pub use cpu::*;
 pub use gdt::*;
-pub use idt::init as idt_init;
+pub use idt::{init as idt_init, register_tick_callback};
 pub use serial::*;

@@ -66,6 +66,11 @@ pub struct InterruptStackFrame {
 }
 
 pub static mut TIMER_TICKS: u64 = 0;
+pub static mut TICK_CALLBACK: Option<unsafe fn()> = None;
+
+pub unsafe fn register_tick_callback(cb: unsafe fn()) {
+    TICK_CALLBACK = Some(cb);
+}
 
 pub unsafe fn init() {
     IDT.entries[0x00].set_handler(asm_divide_error as *const () as usize);
@@ -103,12 +108,16 @@ pub unsafe extern "C" fn generic_exception_handler(vector: u64, error_code: u64,
 pub unsafe extern "C" fn apic_timer_handler() {
     core::ptr::write_volatile(&raw mut TIMER_TICKS, core::ptr::read_volatile(&raw const TIMER_TICKS) + 1);
     let ticks = core::ptr::read_volatile(&raw const TIMER_TICKS);
-    if ticks <= 5 || ticks % 50 == 0 {
+    if ticks <= 5 || ticks % 100 == 0 {
         kprintln!("[TIMER] Quantum Tick: {} (APIC interrupt)", ticks);
     }
     // Send EOI (End of Interrupt) to Local APIC at 0xFEE000B0
     let eoi_reg = 0xFEE000B0 as *mut u32;
     core::ptr::write_volatile(eoi_reg, 0);
+
+    if let Some(cb) = TICK_CALLBACK {
+        cb();
+    }
 }
 
 // Assembly stubs for interrupts

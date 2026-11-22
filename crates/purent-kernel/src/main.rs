@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+pub mod ke;
 pub mod loader;
 pub mod nt;
 
@@ -79,6 +80,8 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     // 3. Initialize KPCR on GS base
     BOOT_KPCR.prcb = &raw mut BOOT_KPCR.prcb_data;
     BOOT_KPCR.nt_tib.self_ptr = &raw mut BOOT_KPCR.nt_tib;
+    BOOT_KPCR.nt_tib.fiber_data = &raw mut BOOT_KPCR.prcb_data as *mut _; // gs:[0x20] points to KPRCB
+    BOOT_KPCR.prcb_data.current_thread = &raw mut ke::BOOT_THREAD;         // gs:[0x188] points to CurrentThread
     purent_hal::cpu::wrmsr(purent_hal::cpu::IA32_GS_BASE, &raw mut BOOT_KPCR as u64);
     kprintln!("[KE] Processor Control Region (KPCR) active at 0x{:016X}", &raw const BOOT_KPCR as usize);
 
@@ -92,7 +95,11 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     // 5. Object Manager initialization
     ob_init();
 
-    // 6. Local APIC and Timer initialization
+    // 6. Thread Scheduler initialization
+    ke::sched_init();
+    purent_hal::register_tick_callback(ke::ki_quantum_end);
+
+    // 7. Local APIC and Timer initialization
     purent_hal::apic_init();
     kprintln!("[HAL] Enabling CPU interrupts (sti)...");
     core::arch::asm!("sti", options(nomem, nostack));
@@ -166,7 +173,42 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     }
     kprintln!("--- [STAGE COMPLETE: NT SYSTEM CALLS VERIFIED] ---\n");
 
+    // 9. Multi-threading and Preemptive Scheduler Verification
+    kprintln!("\n--- [STAGE: MULTI-THREADING & PREEMPTIVE SCHEDULING] ---");
+    let thread1 = ke::ps_create_system_thread(worker_thread_1, 1 as *mut _, "KernelWorker-1");
+    let thread2 = ke::ps_create_system_thread(worker_thread_2, 2 as *mut _, "KernelWorker-2");
+
+    if thread1.is_ok() && thread2.is_ok() {
+        kprintln!("[KE] Threads dispatched into Ready Queue. Yielding to worker threads...");
+        ke::ki_yield();
+    }
+    kprintln!("--- [STAGE COMPLETE: PREEMPTIVE THREADING ACTIVE] ---\n");
+
     kprintln!("[PureNT] System idle. All subsystems operational.");
 
     hlt_loop();
+}
+
+unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
+    let id = context as usize;
+    for i in 1..=3 {
+        kprintln!("[THREAD-{}] Task iteration {} running under preemptive scheduler...", id, i);
+        for _ in 0..1_000_000 { core::hint::spin_loop(); }
+    }
+    kprintln!("[THREAD-{}] Work finished cleanly.", id);
+    loop {
+        core::arch::asm!("hlt", options(nomem, nostack));
+    }
+}
+
+unsafe extern "win64" fn worker_thread_2(context: *mut core::ffi::c_void) {
+    let id = context as usize;
+    for i in 1..=3 {
+        kprintln!("[THREAD-{}] Concurrent task iteration {} executing!", id, i);
+        for _ in 0..1_000_000 { core::hint::spin_loop(); }
+    }
+    kprintln!("[THREAD-{}] Concurrent work finished cleanly.", id);
+    loop {
+        core::arch::asm!("hlt", options(nomem, nostack));
+    }
 }
