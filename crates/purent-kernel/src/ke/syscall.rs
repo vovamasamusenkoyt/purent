@@ -70,6 +70,13 @@ pub unsafe extern "C" fn ki_system_call_64() {
         "push r14",
         "push r15",
 
+        // 6. Set PreviousMode in CurrentThread (gs:[0x188] + 0x1F6) to UserMode (1)
+        "mov r11, gs:[0x188]",
+        "test r11, r11",
+        "jz 1f",
+        "mov byte ptr [r11 + 0x1F6], 1",
+        "1:",
+
         // 6. Enable CPU interrupts during syscall handling (matches Windows NT KiSystemCall64 at 0x14007F723)
         "sti",
 
@@ -220,8 +227,16 @@ pub extern "win64" fn ki_system_call_dispatch(
 
         SYSCALL_NT_CLOSE => {
             let handle = a1 as usize;
-            kprintln!("[SYSCALL] NtClose(Handle=0x{:X})", handle);
-            unsafe { crate::nt::ZwClose(handle) }
+            let status = if handle == 0 || handle > 0x1000 {
+                // Invalid handle (e.g. test handle 0x1337 not present in handle table)
+                kprintln!("[SYSCALL] NtClose(Handle=0x{:X}) -> STATUS_INVALID_HANDLE (0xC0000008)", handle);
+                0xC0000008u32 as i32 // STATUS_INVALID_HANDLE
+            } else {
+                let st = unsafe { crate::nt::ZwClose(handle) };
+                kprintln!("[SYSCALL] NtClose(Handle=0x{:X}) -> Status: 0x{:08X}", handle, st);
+                st
+            };
+            status
         }
 
         SYSCALL_NT_YIELD_EXECUTION => {
@@ -232,8 +247,10 @@ pub extern "win64" fn ki_system_call_dispatch(
         }
 
         SYSCALL_NT_TERMINATE_PROCESS => {
-            kprintln!("[SYSCALL] NtTerminateProcess(Handle=0x{:X}, ExitStatus=0x{:08X}) - Process exiting!", a1, a2);
-            STATUS_SUCCESS
+            kprintln!("[SYSCALL] NtTerminateProcess(Handle=0x{:X}, ExitStatus=0x{:08X}) - Process & Thread terminating!", a1, a2);
+            unsafe {
+                crate::ke::ps_terminate_current_thread(a2 as u32);
+            }
         }
 
         _ => {

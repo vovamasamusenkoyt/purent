@@ -103,6 +103,8 @@ pub unsafe extern "C" fn main() -> ! {
         out("r11") _,
     );
 
+    core::arch::asm!("ud2");
+
     loop {
         core::hint::spin_loop();
     }

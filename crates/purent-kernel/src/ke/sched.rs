@@ -38,7 +38,9 @@ pub static mut BOOT_THREAD: KThread = KThread {
     priority: 8,
     base_priority: 8,
     quantum: DEFAULT_QUANTUM,
-    padding_3: [0; 0x200],
+    padding_3a: [0; 0xB7],
+    previous_mode: 0,
+    padding_3b: [0; 0x169],
 };
 
 pub struct SchedulerQueue {
@@ -315,3 +317,66 @@ pub unsafe fn ki_yield() {
 
     KiSwapContext(curr_thread, next_thread);
 }
+
+/// Wait until a target thread terminates (SignalState != 0 or state == Terminated)
+pub unsafe fn ke_wait_for_single_object(thread: *mut KThread) {
+    if thread.is_null() {
+        return;
+    }
+    while (*thread).state != ThreadState::Terminated as u8 && (*thread).header[4] == 0 {
+        ki_yield();
+    }
+}
+
+/// Terminate the currently running thread:
+/// - Mark state = Terminated
+/// - Set DispatcherHeader SignalState = 1
+/// - Remove from SCHED_QUEUE ready threads
+/// - Switch immediately to next ready thread via KiSwapContext
+pub unsafe fn ps_terminate_current_thread(exit_status: u32) -> ! {
+    let curr = {
+        let q = SCHED_QUEUE.lock();
+        q.ready_threads[q.current_index]
+    };
+
+    kprintln!("[PS] Thread 0x{:016X} terminating (ExitStatus: 0x{:08X}). Removing from Ready Queue...", curr as usize, exit_status);
+
+    let next = {
+        let mut q = SCHED_QUEUE.lock();
+        (*curr).state = ThreadState::Terminated as u8;
+        (*curr).header[4] = 1; // SignalState = 1 in DispatcherHeader (offset 0x04)
+
+        // Remove curr from ready_threads list
+        let mut found_idx = None;
+        for i in 0..q.ready_count {
+            if q.ready_threads[i] == curr {
+                found_idx = Some(i);
+                break;
+            }
+        }
+
+        if let Some(idx) = found_idx {
+            for j in idx..(q.ready_count - 1) {
+                q.ready_threads[j] = q.ready_threads[j + 1];
+            }
+            let last_idx = q.ready_count - 1;
+            q.ready_threads[last_idx] = core::ptr::null_mut();
+            q.ready_count = last_idx;
+        }
+
+        if q.current_index >= q.ready_count {
+            q.current_index = 0;
+        }
+
+        q.ready_threads[q.current_index]
+    };
+
+    kprintln!("[KE] Switching context away from terminated thread to 0x{:016X}...", next as usize);
+    KiSwapContext(curr, next);
+
+    // Will never be scheduled again
+    loop {
+        core::arch::asm!("hlt", options(nomem, nostack));
+    }
+}
+

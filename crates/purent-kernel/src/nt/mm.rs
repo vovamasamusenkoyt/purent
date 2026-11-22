@@ -47,12 +47,14 @@ impl PhysicalMemoryManager {
         let entries = ldr.memory_map_entries as usize;
         let map_addr = ldr.memory_map_addr as usize;
 
+        let mut total_ram_pages = 0usize;
         let mut max_phys_addr = 0u64;
 
-        // Scan memory map for physical RAM boundaries (ignoring MMIO apertures >= 11)
+        // Scan memory map for physical RAM boundaries (types 1..7: Conventional, Loader, BootServices)
         for i in 0..entries {
             let desc = &*(map_addr.wrapping_add(i * desc_size) as *const EfiMemoryDescriptor);
-            if desc.r#type <= 10 {
+            if desc.r#type <= 7 {
+                total_ram_pages += desc.number_of_pages as usize;
                 let end_addr = desc.physical_start + desc.number_of_pages * (PAGE_SIZE as u64);
                 if end_addr > max_phys_addr {
                     max_phys_addr = end_addr;
@@ -60,11 +62,12 @@ impl PhysicalMemoryManager {
             }
         }
 
-        self.total_pages = (max_phys_addr as usize) / PAGE_SIZE;
-        if self.total_pages > 16384 * 64 {
-            self.total_pages = 16384 * 64;
+        let max_frame = (max_phys_addr as usize) / PAGE_SIZE;
+        self.total_pages = total_ram_pages;
+        self.bitmap_words = (max_frame + 63) / 64;
+        if self.bitmap_words > 16384 {
+            self.bitmap_words = 16384;
         }
-        self.bitmap_words = (self.total_pages + 63) / 64;
         self.bitmap_ptr = &raw mut PMM_STORAGE.0 as *mut u64;
 
         // Mark all pages as used
@@ -87,11 +90,13 @@ impl PhysicalMemoryManager {
                 for f in 0..frame_count {
                     let frame = start_frame + f;
                     // Protect first 4MB (where kernel, boot structures, and low memory live)
-                    if frame >= 1024 && frame < self.total_pages {
+                    if frame >= 1024 && frame < max_frame {
                         let word = frame / 64;
                         let bit = frame % 64;
-                        *self.bitmap_ptr.add(word) &= !(1u64 << bit);
-                        free_count += 1;
+                        if word < self.bitmap_words {
+                            *self.bitmap_ptr.add(word) &= !(1u64 << bit);
+                            free_count += 1;
+                        }
                     }
                 }
             }

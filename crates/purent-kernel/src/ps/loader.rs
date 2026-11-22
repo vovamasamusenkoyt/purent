@@ -28,7 +28,7 @@ pub unsafe fn ps_create_user_process(
     pe_bytes: &[u8],
     name: &'static str,
     pid: usize,
-) -> Result<*mut Process, NtStatus> {
+) -> Result<(*mut Process, *mut purent_ntdef::kpcr::KThread), NtStatus> {
     kprintln!("\n[PS] Staging User-Mode PE process \"{}\" (PID: 0x{:X}, {} bytes PE)...", name, pid, pe_bytes.len());
 
     let pe = match PeView::parse(pe_bytes) {
@@ -215,5 +215,5 @@ pub unsafe fn ps_create_user_process(
         entry_point
     );
 
-    Ok(proc_ptr)
+    Ok((proc_ptr, kthread as *mut _))
 }

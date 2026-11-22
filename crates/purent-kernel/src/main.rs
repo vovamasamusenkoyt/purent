@@ -177,18 +177,20 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
 
     // 9. Process Subsystem (Ps), Ring 3 User-Mode PE Process, and Preemptive Scheduler Verification
     kprintln!("\n--- [STAGE: PS USER-MODE PE PROCESS LOADER & MULTI-THREADING] ---");
-    let thread1 = ke::ps_create_system_thread(worker_thread_1, 1 as *mut _, "KernelWorker-1");
-    let thread2 = ke::ps_create_system_thread(worker_thread_2, 2 as *mut _, "KernelWorker-2");
+    let thread1 = ke::ps_create_system_thread(worker_thread_1, 1 as *mut _, "KernelWorker-1").expect("worker1");
+    let thread2 = ke::ps_create_system_thread(worker_thread_2, 2 as *mut _, "KernelWorker-2").expect("worker2");
 
     // Load and launch real Windows User-Mode PE executable (smss.exe)
-    let smss_proc = ps::ps_create_user_process(SMSS_EXE_BYTES, "smss.exe", 0x200);
+    let (_smss_proc, smss_thread) = ps::ps_create_user_process(SMSS_EXE_BYTES, "smss.exe", 0x200).expect("smss");
 
-    if thread1.is_ok() && thread2.is_ok() && smss_proc.is_ok() {
-        kprintln!("[KE] Kernel workers and smss.exe process dispatched into Ready Queue. Yielding CPU...");
-        ke::ki_yield();
-    }
-    kprintln!("--- [STAGE COMPLETE: PREEMPTIVE THREADING & NATIVE PE PROCESS ACTIVE] ---\n");
+    kprintln!("[KE] Kernel workers and smss.exe process active. Synchronizing via KeWaitForSingleObject...");
 
+    // Wait on all worker threads and user process to terminate cleanly
+    ke::ke_wait_for_single_object(thread1);
+    ke::ke_wait_for_single_object(thread2);
+    ke::ke_wait_for_single_object(smss_thread);
+
+    kprintln!("\n--- [STAGE COMPLETE: ALL THREADS TERMINATED & REAPED CLEANLY] ---");
     kprintln!("[PureNT] System idle. All subsystems operational.");
 
     hlt_loop();
@@ -199,25 +201,23 @@ static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows
 unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
     let id = context as usize;
     for i in 1..=3 {
-        kprintln!("[THREAD-{}] Task iteration {} running under preemptive scheduler...", id, i);
-        for _ in 0..1_000_000 { core::hint::spin_loop(); }
+        let tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
+        kprintln!("[THREAD-{}] Task iteration {} executing at tick {} (10ms APIC quantum)...", id, i, tick);
+        ke::ki_yield();
     }
-    kprintln!("[THREAD-{}] Work finished cleanly.", id);
-    loop {
-        core::arch::asm!("hlt", options(nomem, nostack));
-    }
+    kprintln!("[THREAD-{}] Work finished cleanly. Calling ps_terminate_current_thread...", id);
+    ke::ps_terminate_current_thread(0);
 }
 
 unsafe extern "win64" fn worker_thread_2(context: *mut core::ffi::c_void) {
     let id = context as usize;
     for i in 1..=3 {
-        kprintln!("[THREAD-{}] Concurrent task iteration {} executing!", id, i);
-        for _ in 0..1_000_000 { core::hint::spin_loop(); }
+        let tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
+        kprintln!("[THREAD-{}] Concurrent task iteration {} executing at tick {} (10ms APIC quantum)...", id, i, tick);
+        ke::ki_yield();
     }
-    kprintln!("[THREAD-{}] Concurrent work finished cleanly.", id);
-    loop {
-        core::arch::asm!("hlt", options(nomem, nostack));
-    }
+    kprintln!("[THREAD-{}] Concurrent work finished cleanly. Calling ps_terminate_current_thread...", id);
+    ke::ps_terminate_current_thread(0);
 }
 #[no_mangle]
 pub static _fltused: i32 = 0;

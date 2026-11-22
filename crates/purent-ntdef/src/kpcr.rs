@@ -57,7 +57,9 @@ pub struct KThread {
     pub priority: i8,                           // 0x13C
     pub base_priority: i8,                      // 0x13D
     pub quantum: i8,                            // 0x13E
-    pub padding_3: [u8; 0x200],                 // rest of thread struct
+    pub padding_3a: [u8; 0xB7],                 // 0x13F..0x1F6
+    pub previous_mode: i8,                      // 0x1F6 (0 = KernelMode, 1 = UserMode)
+    pub padding_3b: [u8; 0x169],                // 0x1F7..0x360
 }
 
 unsafe impl Send for KThread {}
@@ -104,5 +106,7 @@ const _: () = {
     assert!(core::mem::offset_of!(KThread, process) == 0x70);
     assert!(core::mem::offset_of!(KThread, teb) == 0x0B8);
     assert!(core::mem::offset_of!(KThread, context_switches) == 0x138);
+    assert!(core::mem::offset_of!(KThread, previous_mode) == 0x1F6);
+    assert!(core::mem::size_of::<KThread>() == 0x360);
 };
 
