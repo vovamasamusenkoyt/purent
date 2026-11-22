@@ -5,7 +5,7 @@ use super::surface::{Rect, Surface};
 
 pub const TASKBAR_HEIGHT: u32 = 40;
 
-static WALLPAPER_RGB565: &[u8] = include_bytes!("wallpaper_640x400_rgb565.bin");
+static WALLPAPER_RGB565: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/wallpaper_640x400_rgb565.bin"));
 
 pub struct Desktop {
     pub width: u32,

@@ -222,6 +222,41 @@ impl Surface {
         }
     }
 
+    /// Blit raw 32-bpp RGBA bitmap with per-pixel alpha blending
+    pub fn blit_raw_rgba(&mut self, x: i32, y: i32, w: u32, h: u32, data: &[u8]) {
+        for row in 0..h {
+            let py = y + row as i32;
+            if py < 0 || (py as u32) >= self.height {
+                continue;
+            }
+            for col in 0..w {
+                let px = x + col as i32;
+                if px < 0 || (px as u32) >= self.width {
+                    continue;
+                }
+                let idx = ((row * w + col) * 4) as usize;
+                if idx + 3 < data.len() {
+                    let r = data[idx] as u32;
+                    let g = data[idx + 1] as u32;
+                    let b = data[idx + 2] as u32;
+                    let a = data[idx + 3] as u32;
+                    if a == 255 {
+                        self.put_pixel(px, py, 0xFF000000 | (r << 16) | (g << 8) | b);
+                    } else if a > 0 {
+                        let dst = self.get_pixel(px, py);
+                        let dr = (dst >> 16) & 0xFF;
+                        let dg = (dst >> 8) & 0xFF;
+                        let db = dst & 0xFF;
+                        let out_r = (r * a + dr * (255 - a)) / 255;
+                        let out_g = (g * a + dg * (255 - a)) / 255;
+                        let out_b = (b * a + db * (255 - a)) / 255;
+                        self.put_pixel(px, py, 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b);
+                    }
+                }
+            }
+        }
+    }
+
     /// Windows 7 caption button (Close [X], Maximize [□], Minimize [_])
     pub fn draw_caption_button(&mut self, rect: Rect, btn_type: CaptionButtonType, is_close: bool) {
         // Base button background

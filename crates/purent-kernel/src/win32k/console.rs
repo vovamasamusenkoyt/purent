@@ -1,12 +1,20 @@
 //! PureNT Clean-Room Graphical Console Window
-//! Streams live cmd.exe I/O directly into an interactive desktop window
+//! Streams live cmd.exe I/O directly into an interactive desktop window matching Windows 7 SP1
 
-use super::font::{FONT_HEIGHT, FONT_WIDTH};
+use super::font::FONT_WIDTH;
 use super::surface::{Rect, Surface};
-use super::wnd::{Window, BORDER_WIDTH, CAPTION_HEIGHT};
+use super::wnd::Window;
 
-pub const CONSOLE_COLS: usize = 80;
-pub const CONSOLE_ROWS: usize = 24;
+pub const CONSOLE_COLS: usize = 65;
+pub const CONSOLE_ROWS: usize = 18;
+
+static SCROLL_UP: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_up.raw"));
+static SCROLL_DOWN: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_down.raw"));
+static SCROLL_LEFT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_left.raw"));
+static SCROLL_RIGHT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_right.raw"));
+static SCROLL_VTHUMB_26: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_vthumb_26.raw"));
+static SCROLL_HTHUMB_406: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_hthumb_406.raw"));
+static SCROLL_GRIP: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_grip.raw"));
 
 pub struct ConsoleWindow {
     pub window: Window,
@@ -17,15 +25,14 @@ pub struct ConsoleWindow {
 
 impl ConsoleWindow {
     pub fn new(x: i32, y: i32) -> Self {
-        let client_w = (CONSOLE_COLS * FONT_WIDTH) as u32; // 640
-        let client_h = (CONSOLE_ROWS * FONT_HEIGHT) as u32; // 384
-        let outer_w = client_w + BORDER_WIDTH * 2; // 652
-        let outer_h = client_h + CAPTION_HEIGHT + BORDER_WIDTH; // 420
+        // Authentic Windows 7 565x347 window geometry
+        let outer_w = 565;
+        let outer_h = 347;
 
         Self {
             window: Window::new(
                 0x1001,
-                "C:\\Windows\\system32\\cmd.exe",
+                "", // Clean Aero glass titlebar matching reference screenshot
                 Rect::new(x, y, outer_w, outer_h),
             ),
             buffer: [[b' '; CONSOLE_COLS]; CONSOLE_ROWS],
@@ -53,7 +60,6 @@ impl ConsoleWindow {
                 }
             }
             b'\x08' => {
-                // Backspace
                 if self.cursor_col > 0 {
                     self.cursor_col -= 1;
                     self.buffer[self.cursor_row][self.cursor_col] = b' ';
@@ -95,35 +101,83 @@ impl ConsoleWindow {
         self.cursor_row = CONSOLE_ROWS - 1;
     }
 
-    /// Renders the complete console window (frame + client text buffer + cursor)
+    /// Renders the complete console window matching the reference screenshot pixel-for-pixel
     pub fn draw(&self, surface: &mut Surface) {
-        // 1. Draw outer frame
+        let rx = self.window.rect.x;
+        let ry = self.window.rect.y;
+
+        // 1. Draw outer frosted Aero Glass frame
         self.window.draw_frame(surface);
 
-        // 2. Fill client background with console black
-        let client = self.window.client_rect();
-        surface.fill_rect(client, 0xFF0C0C0C);
+        // 2. Pure Black Console Text Area (x = rx + 10..rx + 538, y = ry + 32..ry + 320)
+        surface.fill_rect(Rect::new(rx + 10, ry + 32, 528, 288), 0xFF000000);
 
-        // 3. Render character matrix
-        let start_x = client.x;
-        let start_y = client.y;
+        // 3. Render character matrix (matching authentic 8x12 font pitch and 0xFFC0C0C0 color)
+        let start_x = rx + 10;
+        let start_y = ry + 33;
+        let line_height = 13;
 
         for r in 0..CONSOLE_ROWS {
-            let row_y = start_y + (r * FONT_HEIGHT) as i32;
+            let row_y = start_y + (r as i32 * line_height);
             for c in 0..CONSOLE_COLS {
                 let col_x = start_x + (c * FONT_WIDTH) as i32;
                 let ch = self.buffer[r][c] as char;
                 if ch != ' ' {
-                    surface.draw_char(col_x, row_y, ch, 0xFFCCCCCC, Some(0xFF0C0C0C));
+                    surface.draw_char(col_x, row_y, ch, 0xFFC0C0C0, Some(0xFF000000));
                 }
             }
         }
 
-        // 4. Render blinking console underscore cursor
+        // 4. Render console cursor (underscore at c:\> prompt)
         if self.cursor_row < CONSOLE_ROWS && self.cursor_col < CONSOLE_COLS {
             let cur_x = start_x + (self.cursor_col * FONT_WIDTH) as i32;
-            let cur_y = start_y + (self.cursor_row * FONT_HEIGHT) as i32 + (FONT_HEIGHT as i32 - 2);
-            surface.fill_rect(Rect::new(cur_x, cur_y, FONT_WIDTH as u32, 2), 0xFFFFFFFF);
+            let cur_y = start_y + (self.cursor_row as i32 * line_height) + 10;
+            surface.fill_rect(Rect::new(cur_x, cur_y, FONT_WIDTH as u32, 2), 0xFFC0C0C0);
         }
+
+        // 5. Vertical Scrollbar (x = rx + 538..rx + 555, y = ry + 32..ry + 320)
+        let vx = rx + 538;
+        let vy = ry + 32;
+
+        // Up arrow button (17x16)
+        surface.blit_raw_rgba(vx, vy, 17, 16, SCROLL_UP);
+
+        // Vertical thumb pill (17x26 at y = vy + 16)
+        surface.blit_raw_rgba(vx, vy + 16, 17, 26, SCROLL_VTHUMB_26);
+
+        // Scrollbar vertical track (y = vy + 42..ry + 303)
+        let vtrack_top = vy + 42;
+        let vtrack_bot = ry + 303;
+        surface.draw_gradient_h(
+            Rect::new(vx, vtrack_top, 17, (vtrack_bot - vtrack_top) as u32),
+            0xFFF0F0F0,
+            0xFFE6E6E6,
+        );
+
+        // Down arrow button (17x17 at ry + 303)
+        surface.blit_raw_rgba(vx, ry + 303, 17, 17, SCROLL_DOWN);
+
+        // 6. Horizontal Scrollbar (x = rx + 10..rx + 538, y = ry + 320..ry + 337)
+        let hx = rx + 10;
+        let hy = ry + 320;
+
+        // Left arrow button (17x17)
+        surface.blit_raw_rgba(hx, hy, 17, 17, SCROLL_LEFT);
+
+        // Horizontal thumb pill (406x17 at x = hx + 17)
+        surface.blit_raw_rgba(hx + 17, hy, 406, 17, SCROLL_HTHUMB_406);
+
+        // Horizontal track (x = hx + 423..rx + 521)
+        surface.draw_gradient_v(
+            Rect::new(hx + 423, hy, (rx + 521 - (hx + 423)) as u32, 17),
+            0xFFF0F0F0,
+            0xFFE6E6E6,
+        );
+
+        // Right arrow button (17x17 at rx + 521)
+        surface.blit_raw_rgba(rx + 521, hy, 17, 17, SCROLL_RIGHT);
+
+        // 7. Diagonal Size Grip (17x17 at rx + 538, ry + 320)
+        surface.blit_raw_rgba(vx, hy, 17, 17, SCROLL_GRIP);
     }
 }

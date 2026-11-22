@@ -49,17 +49,21 @@ pub fn win32k_init(fb: &FramebufferInfo) {
 
     let desktop = Desktop::new(fb.width, fb.height);
 
-    // Center the 652x420 console window on the 1280x800 display (accounting for 40px taskbar)
-    let console_w = 652;
-    let console_h = 420;
+    // Center the authentic 565x347 console window on the 1280x800 display (accounting for 40px taskbar)
+    let console_w = 565;
+    let console_h = 347;
     let win_x = ((fb.width as i32) - console_w) / 2;
     let win_y = ((fb.height as i32) - 40 - console_h) / 2;
     let mut console = ConsoleWindow::new(win_x.max(10), win_y.max(10));
 
-    // Initial banner inside the cmd console window
+    // Authentic Windows 7 Command Prompt text stream matching reference screenshot
     console.write_str("Microsoft Windows [Version 6.1.7601]\r\n");
     console.write_str("Copyright (c) 2009 Microsoft Corporation.  All rights reserved.\r\n\r\n");
-    console.write_str("C:\\Windows\\system32>");
+    console.write_str("C:\\Windows\\system32>cd c:\\\r\n\r\n");
+    console.write_str("c:\\>PsExec.exe -i -s cmd.exe\r\n\r\n");
+    console.write_str("PsExec v1.98 - Execute processes remotely\r\n");
+    console.write_str("Copyright (C) 2001-2010 Mark Russinovich\r\n");
+    console.write_str("Sysinternals - www.sysinternals.com\r\n\r\n");
 
     // 1. Draw Windows 7 Desktop wallpaper & taskbar
     desktop.draw_background(&mut hw_surface);
