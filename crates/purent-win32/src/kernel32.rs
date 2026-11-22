@@ -203,7 +203,7 @@ pub unsafe extern "win64" fn ReadConsoleW(
     // Scripted command sequence for verification
     static mut CMD_STEP: usize = 0;
     let cmd_str: &[u8] = match CMD_STEP {
-        0 => b"echo [VANTA] Original Microsoft Windows 7 cmd.exe running on PureNT Kernel!\r\n",
+        0 => b"echo [PureNT] Original Microsoft Windows 7 cmd.exe running on PureNT Kernel!\r\n",
         1 => b"ver\r\n",
         _ => b"exit\r\n",
     };
