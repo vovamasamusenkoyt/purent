@@ -6,9 +6,9 @@ pub mod nt;
 
 use core::panic::PanicInfo;
 use purent_hal::{gdt, hlt_loop, kprintln, serial::SERIAL1};
-use purent_ntdef::loader::{PureNtLoaderBlock, PURENT_LOADER_MAGIC};
-
 use purent_ntdef::kpcr::{Kpcr, Kprcb, NtTib};
+use purent_ntdef::loader::{PureNtLoaderBlock, PURENT_LOADER_MAGIC};
+use crate::nt::mm::{pmm_init, pool_init};
 
 static mut BOOT_KPCR: Kpcr = Kpcr {
     nt_tib: NtTib {
@@ -77,16 +77,23 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     kprintln!("[BOOT] Kernel physical base: 0x{:016X}", ldr.kernel_physical_base);
     kprintln!("[BOOT] Kernel virtual base:  0xFFFFF80000200000");
     kprintln!("[BOOT] Kernel size:          {} KiB", ldr.kernel_size / 1024);
-    kprintln!("[BOOT] Physical memory map:  {} entries", ldr.memory_map_entries);
+
+    // Initialize Physical Memory Manager (PMM)
+    pmm_init(ldr);
+
+    // Initialize NonPagedPool (Dynamic Kernel Heap)
+    pool_init();
 
     kprintln!("[EX] Object Manager (Ob) initialized.");
     kprintln!("[IO] I/O Manager (Io) initialized.");
-    kprintln!("[KE] Processor Control Region (KPCR) ready.");
 
     kprintln!("\n--- [STAGE: LOADING NATIVE BINARY DRIVER] ---");
     let loaded = loader::load_null_driver();
     if loaded {
         kprintln!("--- [STAGE COMPLETE: NATIVE DRIVER ACTIVE] ---\n");
+
+        // Execute synthetic IRP dispatch loop against null.sys
+        loader::test_driver_io();
     } else {
         kprintln!("--- [STAGE FAILED] ---\n");
     }

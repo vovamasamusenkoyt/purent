@@ -1,11 +1,19 @@
 //! NT Kernel Executive Services (Rtl, Io, Mm, Ke)
 
+pub mod io;
+pub mod mm;
+
+pub use io::*;
+pub use mm::*;
+
 use purent_hal::kprintln;
 use purent_ntdef::{
-    string::UnicodeString,
+    io::{DeviceObject, DriverObject, Irp},
     status::{NtStatus, STATUS_SUCCESS},
-    io::{DriverObject, DeviceObject, Irp},
+    string::UnicodeString,
 };
+
+pub const DEVICE_TAG: u32 = 0x65766544; // 'Deve'
 
 #[no_mangle]
 pub unsafe extern "win64" fn RtlInitUnicodeString(
@@ -29,45 +37,38 @@ pub unsafe extern "win64" fn RtlInitUnicodeString(
     (*destination_string).buffer = source_string as *mut u16;
 }
 
-static mut CREATED_DEVICES: [DeviceObject; 8] = [DeviceObject {
-    r#type: 3,
-    size: core::mem::size_of::<DeviceObject>() as u16,
-    reference_count: 1,
-    driver_object: core::ptr::null_mut(),
-    next_device: core::ptr::null_mut(),
-    attached_device: core::ptr::null_mut(),
-    current_irp: core::ptr::null_mut(),
-    timer: core::ptr::null_mut(),
-    flags: 0,
-    characteristics: 0,
-    vpb: core::ptr::null_mut(),
-    device_extension: core::ptr::null_mut(),
-    device_type: 0,
-    stack_size: 1,
-}; 8];
-static mut CREATED_DEVICE_COUNT: usize = 0;
-
 #[no_mangle]
 pub unsafe extern "win64" fn IoCreateDevice(
     driver_object: *mut DriverObject,
-    _device_extension_size: u32,
+    device_extension_size: u32,
     device_name: *mut UnicodeString,
     device_type: u32,
     device_characteristics: u32,
     _exclusive: u8,
     device_object: *mut *mut DeviceObject,
 ) -> NtStatus {
-    if CREATED_DEVICE_COUNT >= CREATED_DEVICES.len() {
+    let dev_size = core::mem::size_of::<DeviceObject>();
+    let total_size = dev_size + (device_extension_size as usize);
+
+    // Dynamically allocate from NonPagedPool
+    let dev_ptr = ExAllocatePoolWithTag(NonPagedPool, total_size, DEVICE_TAG) as *mut DeviceObject;
+    if dev_ptr.is_null() {
         return -1073741801; // STATUS_NO_MEMORY
     }
 
-    let dev_ptr = &raw mut CREATED_DEVICES[CREATED_DEVICE_COUNT];
-    CREATED_DEVICE_COUNT += 1;
+    core::ptr::write_bytes(dev_ptr as *mut u8, 0, total_size);
 
+    (*dev_ptr).r#type = 3; // IO_TYPE_DEVICE
+    (*dev_ptr).size = total_size as u16;
+    (*dev_ptr).reference_count = 1;
     (*dev_ptr).driver_object = driver_object;
     (*dev_ptr).device_type = device_type;
     (*dev_ptr).characteristics = device_characteristics;
     (*dev_ptr).stack_size = 1;
+
+    if device_extension_size > 0 {
+        (*dev_ptr).device_extension = (dev_ptr as usize + dev_size) as *mut core::ffi::c_void;
+    }
 
     if !driver_object.is_null() {
         (*dev_ptr).next_device = (*driver_object).device_object;
@@ -79,9 +80,9 @@ pub unsafe extern "win64" fn IoCreateDevice(
     }
 
     if !device_name.is_null() && !(*device_name).buffer.is_null() {
-        kprintln!("[IO] IoCreateDevice: registered device type 0x{:X}", device_type);
+        kprintln!("[IO] IoCreateDevice: registered device type 0x{:X} at 0x{:p} (allocated from NonPagedPool)", device_type, dev_ptr);
     } else {
-        kprintln!("[IO] IoCreateDevice: anonymous device created");
+        kprintln!("[IO] IoCreateDevice: anonymous device created at 0x{:p}", dev_ptr);
     }
 
     STATUS_SUCCESS
@@ -89,7 +90,10 @@ pub unsafe extern "win64" fn IoCreateDevice(
 
 #[no_mangle]
 pub unsafe extern "win64" fn IoDeleteDevice(device_object: *mut DeviceObject) {
-    kprintln!("[IO] IoDeleteDevice at 0x{:p}", device_object);
+    if !device_object.is_null() {
+        kprintln!("[IO] IoDeleteDevice at 0x{:p}", device_object);
+        ExFreePoolWithTag(device_object as *mut core::ffi::c_void, DEVICE_TAG);
+    }
 }
 
 #[no_mangle]
@@ -100,12 +104,18 @@ pub unsafe extern "win64" fn IoDeleteSymbolicLink(_symbolic_link_name: *mut Unic
 
 #[no_mangle]
 pub unsafe extern "win64" fn IofCompleteRequest(irp: *mut Irp, priority_boost: i8) {
-    kprintln!("[IO] IofCompleteRequest: IRP at 0x{:p} completed (boost: {})", irp, priority_boost);
+    if !irp.is_null() {
+        kprintln!("[IO] IofCompleteRequest: IRP 0x{:p} completed (Status: 0x{:08X}, Info: {}, Boost: {})",
+            irp,
+            (*irp).io_status.status,
+            (*irp).io_status.information,
+            priority_boost
+        );
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn MmPageEntireDriver(address: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
-    // PureNT runs resident drivers in kernel space
     address
 }
 

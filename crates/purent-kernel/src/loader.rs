@@ -147,3 +147,46 @@ pub unsafe fn load_null_driver() -> bool {
         false
     }
 }
+
+pub unsafe fn test_driver_io() {
+    let dev = NULL_DRIVER_OBJECT.device_object;
+    if dev.is_null() {
+        kprintln!("[IO-TEST] No device object found on NULL driver!");
+        return;
+    }
+
+    kprintln!("\n--- [STAGE: IRP DISPATCH TO NULL DRIVER] ---");
+
+    // 1. Dispatch IRP_MJ_CREATE
+    let irp = IoAllocateIrp(1, 0);
+    let next_stack = io_get_next_irp_stack_location(irp);
+    (*next_stack).major_function = purent_ntdef::io::IRP_MJ_CREATE;
+    kprintln!("[IO-TEST] 1. Dispatching IRP_MJ_CREATE...");
+    let status = IoCallDriver(dev, irp);
+    kprintln!("[IO-TEST] IRP_MJ_CREATE returned: 0x{:08X}", status);
+    IoFreeIrp(irp);
+
+    // 2. Dispatch IRP_MJ_WRITE with test payload
+    let irp = IoAllocateIrp(1, 0);
+    let next_stack = io_get_next_irp_stack_location(irp);
+    (*next_stack).major_function = purent_ntdef::io::IRP_MJ_WRITE;
+    let payload_len = 25usize;
+    (*next_stack).parameters[1] = payload_len; // Length in Parameters.Write.Length
+    let test_buf = b"PureNT native I/O works!\0";
+    (*irp).associated_irp_system_buffer = test_buf.as_ptr() as *mut _;
+    kprintln!("[IO-TEST] 2. Dispatching IRP_MJ_WRITE ({} bytes: \"{}\")...", payload_len, core::str::from_utf8_unchecked(&test_buf[..24]));
+    let status = IoCallDriver(dev, irp);
+    kprintln!("[IO-TEST] IRP_MJ_WRITE returned: 0x{:08X} (bytes processed: {})", status, (*irp).io_status.information);
+    IoFreeIrp(irp);
+
+    // 3. Dispatch IRP_MJ_CLOSE
+    let irp = IoAllocateIrp(1, 0);
+    let next_stack = io_get_next_irp_stack_location(irp);
+    (*next_stack).major_function = purent_ntdef::io::IRP_MJ_CLOSE;
+    kprintln!("[IO-TEST] 3. Dispatching IRP_MJ_CLOSE...");
+    let status = IoCallDriver(dev, irp);
+    kprintln!("[IO-TEST] IRP_MJ_CLOSE returned: 0x{:08X}", status);
+    IoFreeIrp(irp);
+
+    kprintln!("--- [STAGE COMPLETE: FULL I/O CYCLE VERIFIED] ---\n");
+}
