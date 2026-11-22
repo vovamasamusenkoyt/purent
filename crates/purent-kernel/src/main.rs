@@ -185,10 +185,15 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
 
     kprintln!("[KE] Kernel workers and smss.exe process active. Synchronizing via KeWaitForSingleObject...");
 
-    // Wait on all worker threads and user process to terminate cleanly
+    // Wait on all worker threads and user process to terminate cleanly, and reap their resources
     ke::ke_wait_for_single_object(thread1);
+    ps::ps_reap_thread(thread1);
+
     ke::ke_wait_for_single_object(thread2);
+    ps::ps_reap_thread(thread2);
+
     ke::ke_wait_for_single_object(smss_thread);
+    ps::ps_reap_thread(smss_thread);
 
     kprintln!("\n--- [STAGE COMPLETE: ALL THREADS TERMINATED & REAPED CLEANLY] ---");
     kprintln!("[PureNT] System idle. All subsystems operational.");
@@ -201,9 +206,13 @@ static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows
 unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
     let id = context as usize;
     for i in 1..=3 {
-        let tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
-        kprintln!("[THREAD-{}] Task iteration {} executing at tick {} (10ms APIC quantum)...", id, i, tick);
-        ke::ki_yield();
+        let start_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
+        kprintln!("[THREAD-{}] Task iteration {} starting at tick {} (10ms APIC quantum)...", id, i, start_tick);
+        while core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS) < start_tick + 2 {
+            core::hint::spin_loop();
+        }
+        let end_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
+        kprintln!("[THREAD-{}] Task iteration {} finished at tick {} (preemption verified)", id, i, end_tick);
     }
     kprintln!("[THREAD-{}] Work finished cleanly. Calling ps_terminate_current_thread...", id);
     ke::ps_terminate_current_thread(0);
@@ -212,9 +221,13 @@ unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
 unsafe extern "win64" fn worker_thread_2(context: *mut core::ffi::c_void) {
     let id = context as usize;
     for i in 1..=3 {
-        let tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
-        kprintln!("[THREAD-{}] Concurrent task iteration {} executing at tick {} (10ms APIC quantum)...", id, i, tick);
-        ke::ki_yield();
+        let start_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
+        kprintln!("[THREAD-{}] Concurrent task iteration {} starting at tick {} (10ms APIC quantum)...", id, i, start_tick);
+        while core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS) < start_tick + 2 {
+            core::hint::spin_loop();
+        }
+        let end_tick = core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS);
+        kprintln!("[THREAD-{}] Concurrent task iteration {} finished at tick {} (preemption verified)", id, i, end_tick);
     }
     kprintln!("[THREAD-{}] Concurrent work finished cleanly. Calling ps_terminate_current_thread...", id);
     ke::ps_terminate_current_thread(0);

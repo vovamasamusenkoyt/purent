@@ -50,10 +50,16 @@ impl PhysicalMemoryManager {
         let mut total_ram_pages = 0usize;
         let mut max_phys_addr = 0u64;
 
-        // Scan memory map for physical RAM boundaries (types 1..7: Conventional, Loader, BootServices)
+        // Scan memory map for physical RAM boundaries (types 1..4 and 7: Loader, BootServices, Conventional)
         for i in 0..entries {
             let desc = &*(map_addr.wrapping_add(i * desc_size) as *const EfiMemoryDescriptor);
-            if desc.r#type <= 7 {
+            let is_ram = desc.r#type == 1
+                || desc.r#type == 2
+                || desc.r#type == 3
+                || desc.r#type == 4
+                || desc.r#type == 7;
+
+            if is_ram {
                 total_ram_pages += desc.number_of_pages as usize;
                 let end_addr = desc.physical_start + desc.number_of_pages * (PAGE_SIZE as u64);
                 if end_addr > max_phys_addr {
@@ -89,8 +95,8 @@ impl PhysicalMemoryManager {
 
                 for f in 0..frame_count {
                     let frame = start_frame + f;
-                    // Protect first 4MB (where kernel, boot structures, and low memory live)
-                    if frame >= 1024 && frame < max_frame {
+                    // Protect first 16MB (where low memory, kernel, and user-mode processes live: 0x000000..0x01000000)
+                    if frame >= 4096 && frame < max_frame {
                         let word = frame / 64;
                         let bit = frame % 64;
                         if word < self.bitmap_words {

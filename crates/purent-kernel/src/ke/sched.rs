@@ -60,9 +60,10 @@ pub static SCHED_QUEUE: purent_hal::SpinLock<SchedulerQueue> = purent_hal::SpinL
 #[unsafe(naked)]
 unsafe extern "win64" fn ki_thread_start_trampoline() {
     core::arch::naked_asm!(
-        "sti",
-        "mov rcx, rdi", // context passed in RDI -> Windows x64 RCX argument 1
-        "call rbx",     // routine passed in RBX
+        "sub rsp, 0x20", // 32 bytes Win64 shadow store (keeps RSP % 16 == 0)
+        "mov rcx, rdi",  // context passed in RDI -> Windows x64 RCX argument 1
+        "call rbx",      // routine passed in RBX
+        "add rsp, 0x20",
         "1: hlt",
         "jmp 1b",
     );
@@ -78,6 +79,9 @@ pub unsafe extern "win64" fn KiSwapContext(
     next_thread: *mut KThread,
 ) {
     core::arch::naked_asm!(
+        // Disable interrupts during atomic context swap
+        "cli",
+
         // 1. Allocate 0x138 stack frame (matching ntoskrnl KiSwapContext)
         "sub rsp, 0x138",
 
@@ -125,8 +129,10 @@ pub unsafe extern "win64" fn KiSwapContext(
         "1:",
         "push rsi",
         "push rdi",
+        "sub rsp, 0x20", // 32 bytes shadow store for Win64 ABI
         "mov rcx, rax",
         "call {set_rsp0}",
+        "add rsp, 0x20",
         "pop rdi",
         "pop rsi",
 
@@ -179,6 +185,7 @@ pub unsafe extern "win64" fn KiSwapContext(
 
         // 12. Deallocate stack frame and return to thread's instruction stream!
         "add rsp, 0x138",
+        "sti",
         "ret",
         set_rsp0 = sym purent_hal::gdt::set_rsp0,
     );

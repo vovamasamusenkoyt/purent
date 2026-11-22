@@ -128,10 +128,12 @@ macro_rules! interrupt_stub_no_err {
             naked_asm!(
                 "push 0", // dummy error code
                 "push rax", "push rcx", "push rdx", "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
-                "mov rdi, {vec}",
-                "mov rsi, [rsp + 9 * 8]", // error code
-                "lea rdx, [rsp + 10 * 8]", // InterruptStackFrame pointer
+                "sub rsp, 0x28", // 32 bytes Win64 shadow store + 8 bytes alignment
+                "mov rcx, {vec}",
+                "mov rdx, [rsp + 0x28 + 9 * 8]", // error code
+                "lea r8, [rsp + 0x28 + 10 * 8]", // InterruptStackFrame pointer
                 "call generic_exception_handler",
+                "add rsp, 0x28",
                 "pop r11", "pop r10", "pop r9", "pop r8", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rax",
                 "add rsp, 8",
                 "iretq",
@@ -147,10 +149,12 @@ macro_rules! interrupt_stub_err {
         unsafe extern "C" fn $name() {
             naked_asm!(
                 "push rax", "push rcx", "push rdx", "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
-                "mov rdi, {vec}",
-                "mov rsi, [rsp + 9 * 8]", // error code
-                "lea rdx, [rsp + 10 * 8]", // InterruptStackFrame pointer
+                "sub rsp, 0x28", // 32 bytes Win64 shadow store + 8 bytes alignment
+                "mov rcx, {vec}",
+                "mov rdx, [rsp + 0x28 + 9 * 8]", // error code
+                "lea r8, [rsp + 0x28 + 10 * 8]", // InterruptStackFrame pointer
                 "call generic_exception_handler",
+                "add rsp, 0x28",
                 "pop r11", "pop r10", "pop r9", "pop r8", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rax",
                 "add rsp, 8",
                 "iretq",
@@ -175,7 +179,9 @@ unsafe extern "C" fn asm_apic_timer() {
         "jz 1f",
         "swapgs",
         "1:",
+        "sub rsp, 0x20", // 32 bytes shadow store for Win64 ABI
         "call apic_timer_handler",
+        "add rsp, 0x20",
         "test byte ptr [rsp + 0x50], 3",
         "jz 2f",
         "swapgs",

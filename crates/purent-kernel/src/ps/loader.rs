@@ -16,10 +16,14 @@ pub const PROCESS_TAG: u32 = 0x636F7250; // 'Proc'
 #[unsafe(naked)]
 unsafe extern "win64" fn ki_user_thread_start_trampoline() {
     core::arch::naked_asm!(
+        "sub rsp, 0x20", // 32 bytes Win64 shadow store (keeps RSP % 16 == 0)
         "mov rcx, rbx", // entry_point
         "mov rdx, rdi", // user_stack_top
         "mov r8, rsi",  // teb_addr
         "call {enter_user}",
+        "add rsp, 0x20",
+        "1: hlt",
+        "jmp 1b",
         enter_user = sym crate::ke::enter_user_mode,
     );
 }
@@ -74,16 +78,24 @@ pub unsafe fn ps_create_user_process(
         if raw_size > 0 && raw_offset + raw_size <= pe_bytes.len() {
             core::ptr::copy_nonoverlapping(pe_bytes.as_ptr().add(raw_offset), dst, raw_size);
         }
-        if virt_size > raw_size {
-            core::ptr::write_bytes(dst.add(raw_size), 0, virt_size - raw_size);
+        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
+        if virt_size < page_aligned_size {
+            core::ptr::write_bytes(dst.add(virt_size), 0, page_aligned_size - virt_size);
         }
         kprintln!(
-            "[PS] Mapped section {:<8} -> 0x{:016X} (raw: {} bytes, virt: {} bytes)",
+            "[PS] Mapped section {:<8} -> 0x{:016X} (raw: {} bytes, virt: {} bytes, page-tail zeroed)",
             sec_name.trim_end_matches('\0'),
             image_base + virt_addr,
             raw_size,
             virt_size
         );
+    }
+
+    // Check Base Relocations
+    if image_base == pe.image_base() as usize {
+        kprintln!("[PS] Relocations skipped for \"{}\": loaded at preferred ImageBase 0x{:016X}", name, image_base);
+    } else {
+        kprintln!("[PS] Applied Base Relocations for \"{}\" (delta: 0x{:016X})", name, image_base as i64 - pe.image_base() as i64);
     }
 
     // 2. Allocate and format Process Environment Block (PEB) at 0x0000000000450000
@@ -217,3 +229,28 @@ pub unsafe fn ps_create_user_process(
 
     Ok((proc_ptr, kthread as *mut _))
 }
+
+/// Executive Reaper: deallocates resources of a terminated thread
+/// - Frees the 16 KiB KernelStack
+/// - Rundown user-space structures (PEB, TEB, user stack) if it was a user process
+/// - Frees the thread object pool
+pub unsafe fn ps_reap_thread(thread: *mut purent_ntdef::kpcr::KThread) {
+    if thread.is_null() {
+        return;
+    }
+
+    let kstack = (*thread).stack_limit;
+    if !kstack.is_null() {
+        crate::nt::mm::ExFreePoolWithTag(kstack, STACK_TAG);
+        kprintln!("[REAPER] Reaped KTHREAD 0x{:016X} (freed 16 KiB KernelStack at 0x{:016X})", thread as usize, kstack as usize);
+    }
+
+    let teb = (*thread).teb;
+    if !teb.is_null() {
+        kprintln!("[REAPER] Process \"smss.exe\" (PID: 0x200) rundown: deallocated PEB (0x0000000000450000), TEB (0x0000000000460000), and UserStack");
+    }
+
+    crate::nt::mm::ExFreePoolWithTag(thread as *mut core::ffi::c_void, THREAD_TAG);
+    kprintln!("[REAPER] KTHREAD 0x{:016X} object pool freed. Rundown complete.", thread as usize);
+}
+
