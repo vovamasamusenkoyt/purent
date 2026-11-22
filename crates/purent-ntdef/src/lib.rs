@@ -9,6 +9,7 @@ pub mod object;
 pub mod ps;
 pub mod status;
 pub mod string;
+pub mod syscall;
 
 pub use io::*;
 pub use kpcr::*;
@@ -19,3 +20,4 @@ pub use object::*;
 pub use ps::*;
 pub use status::*;
 pub use string::*;
+pub use syscall::*;

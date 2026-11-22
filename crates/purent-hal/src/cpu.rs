@@ -68,6 +68,63 @@ pub unsafe fn write_cr3(val: u64) {
 }
 
 #[inline(always)]
+pub unsafe fn invlpg(va: u64) {
+    asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags));
+}
+
+#[inline(always)]
+pub unsafe fn cli() {
+    asm!("cli", options(nomem, nostack));
+}
+
+#[inline(always)]
+pub unsafe fn sti() {
+    asm!("sti", options(nomem, nostack));
+}
+
+#[inline(always)]
+pub unsafe fn halt() {
+    asm!("hlt", options(nomem, nostack));
+}
+
+#[inline(always)]
+pub unsafe fn swapgs() {
+    asm!("swapgs", options(nomem, nostack));
+}
+
+#[inline(always)]
+pub unsafe fn read_gs_u64(offset: u32) -> u64 {
+    let val: u64;
+    match offset {
+        0x10 => asm!("mov {}, gs:[0x10]", out(reg) val, options(nomem, nostack, preserves_flags)),
+        0x20 => asm!("mov {}, gs:[0x20]", out(reg) val, options(nomem, nostack, preserves_flags)),
+        0x188 => asm!("mov {}, gs:[0x188]", out(reg) val, options(nomem, nostack, preserves_flags)),
+        0x1A8 => asm!("mov {}, gs:[0x1A8]", out(reg) val, options(nomem, nostack, preserves_flags)),
+        _ => {
+            // General GS read with variable offset
+            asm!("mov rax, gs:[{offset:e}]", offset = in(reg) offset, lateout("rax") val, options(nomem, nostack, preserves_flags));
+        }
+    }
+    val
+}
+
+#[inline(always)]
+pub unsafe fn write_gs_u64(offset: u32, val: u64) {
+    match offset {
+        0x10 => asm!("mov gs:[0x10], {}", in(reg) val, options(nomem, nostack, preserves_flags)),
+        0x188 => asm!("mov gs:[0x188], {}", in(reg) val, options(nomem, nostack, preserves_flags)),
+        _ => {
+            asm!("mov gs:[{offset:e}], {val}", offset = in(reg) offset, val = in(reg) val, options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+#[inline(always)]
+pub unsafe fn read_current_thread<T>() -> *mut T {
+    read_gs_u64(0x188) as *mut T
+}
+
+#[inline(always)]
 pub fn hlt_loop() -> ! {
     loop {
         unsafe {

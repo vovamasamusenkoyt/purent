@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+use purent_ntdef::syscall::{
+    nt_current_peb_address, nt_current_teb_address, nt_syscall0, nt_syscall1, nt_syscall2,
+    nt_syscall4, nt_syscall5, nt_syscall6,
+};
+
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
@@ -59,6 +64,15 @@ const PAGE_READONLY: u32 = 0x02;
 const PAGE_READWRITE: u32 = 0x04;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 
+// Windows 7 SP1 Syscall Numbers
+const SYSCALL_NT_CLOSE: u64 = 0x0C;
+const SYSCALL_NT_ALLOCATE_VIRTUAL_MEMORY: u64 = 0x15;
+const SYSCALL_NT_FREE_VIRTUAL_MEMORY: u64 = 0x1B;
+const SYSCALL_NT_QUERY_VIRTUAL_MEMORY: u64 = 0x20;
+const SYSCALL_NT_TERMINATE_PROCESS: u64 = 0x29;
+const SYSCALL_NT_YIELD_EXECUTION: u64 = 0x43;
+const SYSCALL_NT_PROTECT_VIRTUAL_MEMORY: u64 = 0x4D;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 struct MemoryBasicInformation {
@@ -82,27 +96,15 @@ unsafe fn nt_allocate_virtual_memory(
     allocation_type: u32,
     protect: u32,
 ) -> i32 {
-    let status: i32;
-    core::arch::asm!(
-        "sub rsp, 0x40",
-        "mov qword ptr [rsp + 0x28], {alloc_type}",
-        "mov qword ptr [rsp + 0x30], {protect}",
-        "mov r10, {proc}",
-        "mov eax, 0x15",
-        "syscall",
-        "add rsp, 0x40",
-        proc = in(reg) process_handle,
-        in("rdx") base_address,
-        in("r8") zero_bits,
-        in("r9") region_size,
-        alloc_type = in(reg) allocation_type as u64,
-        protect = in(reg) protect as u64,
-        lateout("rax") status,
-        out("rcx") _,
-        out("r11") _,
-        out("r10") _,
-    );
-    status
+    nt_syscall6(
+        SYSCALL_NT_ALLOCATE_VIRTUAL_MEMORY,
+        process_handle as u64,
+        base_address as u64,
+        zero_bits as u64,
+        region_size as u64,
+        allocation_type as u64,
+        protect as u64,
+    )
 }
 
 #[inline(always)]
@@ -112,21 +114,13 @@ unsafe fn nt_free_virtual_memory(
     region_size: *mut usize,
     free_type: u32,
 ) -> i32 {
-    let status: i32;
-    core::arch::asm!(
-        "mov r10, {proc}",
-        "mov eax, 0x1B",
-        "syscall",
-        proc = in(reg) process_handle,
-        in("rdx") base_address,
-        in("r8") region_size,
-        in("r9") free_type as u64,
-        lateout("rax") status,
-        out("rcx") _,
-        out("r11") _,
-        out("r10") _,
-    );
-    status
+    nt_syscall4(
+        SYSCALL_NT_FREE_VIRTUAL_MEMORY,
+        process_handle as u64,
+        base_address as u64,
+        region_size as u64,
+        free_type as u64,
+    )
 }
 
 #[inline(always)]
@@ -138,27 +132,15 @@ unsafe fn nt_query_virtual_memory(
     mem_info_len: usize,
     return_len: *mut usize,
 ) -> i32 {
-    let status: i32;
-    core::arch::asm!(
-        "sub rsp, 0x40",
-        "mov qword ptr [rsp + 0x28], {info_len}",
-        "mov qword ptr [rsp + 0x30], {ret_len}",
-        "mov r10, {proc}",
-        "mov eax, 0x20",
-        "syscall",
-        "add rsp, 0x40",
-        proc = in(reg) process_handle,
-        in("rdx") base_address,
-        in("r8") info_class as u64,
-        in("r9") mem_info,
-        info_len = in(reg) mem_info_len,
-        ret_len = in(reg) return_len,
-        lateout("rax") status,
-        out("rcx") _,
-        out("r11") _,
-        out("r10") _,
-    );
-    status
+    nt_syscall6(
+        SYSCALL_NT_QUERY_VIRTUAL_MEMORY,
+        process_handle as u64,
+        base_address as u64,
+        info_class as u64,
+        mem_info as u64,
+        mem_info_len as u64,
+        return_len as u64,
+    )
 }
 
 #[inline(always)]
@@ -169,36 +151,23 @@ unsafe fn nt_protect_virtual_memory(
     new_protect: u32,
     old_protect: *mut u32,
 ) -> i32 {
-    let status: i32;
-    core::arch::asm!(
-        "sub rsp, 0x40",
-        "mov qword ptr [rsp + 0x28], {old_prot}",
-        "mov r10, {proc}",
-        "mov eax, 0x4D",
-        "syscall",
-        "add rsp, 0x40",
-        proc = in(reg) process_handle,
-        in("rdx") base_address,
-        in("r8") region_size,
-        in("r9") new_protect as u64,
-        old_prot = in(reg) old_protect,
-        lateout("rax") status,
-        out("rcx") _,
-        out("r11") _,
-        out("r10") _,
-    );
-    status
+    nt_syscall5(
+        SYSCALL_NT_PROTECT_VIRTUAL_MEMORY,
+        process_handle as u64,
+        base_address as u64,
+        region_size as u64,
+        new_protect as u64,
+        old_protect as u64,
+    )
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn main() -> ! {
-    // 1. Read TEB address from gs:[0x30] (NtTib.Self)
-    let teb_ptr: usize;
-    core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb_ptr);
+    // 1. Read TEB address from gs:[0x30] (NtTib.Self) via typed abstraction
+    let teb_ptr = nt_current_teb_address();
 
-    // 2. Read PEB address from gs:[0x60] (TEB.ProcessEnvironmentBlock)
-    let peb_ptr: usize;
-    core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb_ptr);
+    // 2. Read PEB address from gs:[0x60] (TEB.ProcessEnvironmentBlock) via typed abstraction
+    let peb_ptr = nt_current_peb_address();
 
     // 3. Read OSMajorVersion (+0x118) and OSBuildNumber (+0x120) from PEB
     let os_major = *(peb_ptr.wrapping_add(0x118) as *const u32);
@@ -208,24 +177,10 @@ pub unsafe extern "C" fn main() -> ! {
     let _pid = *(teb_ptr.wrapping_add(0x40) as *const usize);
 
     // 5. Test NtClose syscall (0x0C) with magic handle 0x1337
-    core::arch::asm!(
-        "mov r10, 0x1337",
-        "mov eax, 0x0C", // NtClose
-        "syscall",
-        out("eax") _,
-        out("r10") _,
-        out("rcx") _,
-        out("r11") _,
-    );
+    let _ = nt_syscall1(SYSCALL_NT_CLOSE, 0x1337);
 
     // 6. Test NtYieldExecution syscall (0x43)
-    core::arch::asm!(
-        "mov eax, 0x43", // NtYieldExecution
-        "syscall",
-        out("eax") _,
-        out("rcx") _,
-        out("r11") _,
-    );
+    let _ = nt_syscall0(SYSCALL_NT_YIELD_EXECUTION);
 
     // 7. Dynamic Virtual Memory Tests:
     // Test A: Allocate 64 KiB at dynamic base (0 = kernel chosen)
@@ -325,20 +280,7 @@ pub unsafe extern "C" fn main() -> ! {
         0xC0000001u32
     };
 
-    core::arch::asm!(
-        "mov r10, -1",
-        "mov edx, {0:e}",
-        "mov eax, 0x29", // NtTerminateProcess
-        "syscall",
-        in(reg) exit_status,
-        out("eax") _,
-        out("r10") _,
-        out("rdx") _,
-        out("rcx") _,
-        out("r11") _,
-    );
-
-    core::arch::asm!("ud2");
+    let _ = nt_syscall2(SYSCALL_NT_TERMINATE_PROCESS, !0u64, exit_status as u64);
 
     loop {
         core::hint::spin_loop();

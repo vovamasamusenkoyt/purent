@@ -1,8 +1,9 @@
-//! PureNT Process Subsystem (Ps)
-//! Implements Windows NT 6.1 x64 Process & Thread Objects, PE Loading, and PEB/TEB Setup
+//! NT Process & Thread Management (Ps) Subsystem
 
 pub mod process;
 pub mod loader;
+pub mod reaper;
 
 pub use process::*;
 pub use loader::*;
+pub use reaper::*;

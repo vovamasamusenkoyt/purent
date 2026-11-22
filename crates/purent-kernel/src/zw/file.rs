@@ -1,5 +1,4 @@
-//! NT System Calls and Executive API (Zw* / Nt*)
-//! Provides native system services that bridge userland and drivers to the kernel I/O and Object systems.
+//! NT System Services for File and Device Operations (ZwCreateFile, ZwWriteFile, ZwReadFile, ZwClose)
 
 use purent_hal::kprintln;
 use purent_ntdef::{
@@ -12,16 +11,13 @@ use purent_ntdef::{
         NtStatus, STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER,
         STATUS_NO_MEMORY, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
     },
-    string::UnicodeString,
 };
 
-use crate::nt::{
-    io::{io_get_next_irp_stack_location, IoAllocateIrp, IoCallDriver, IoFreeIrp},
-    mm::{ExAllocatePoolWithTag, ExFreePoolWithTag, NonPagedPool},
-    ob::{
-        ob_close_handle, ob_create_handle, ob_insert_file, ob_reference_object_by_handle,
-        ob_reference_object_by_name, OB_TYPE_FILE,
-    },
+use crate::io::{io_get_next_irp_stack_location, IoAllocateIrp, IoCallDriver, IoFreeIrp};
+use crate::mm::{ExAllocatePoolWithTag, ExFreePoolWithTag, NonPagedPool};
+use crate::ob::{
+    ob_close_handle, ob_create_handle, ob_insert_file, ob_reference_object_by_handle,
+    ob_reference_object_by_name, OB_TYPE_FILE,
 };
 
 pub const FILE_TAG: u32 = 0x656C6946; // 'File'
@@ -238,7 +234,7 @@ pub unsafe extern "win64" fn ZwClose(handle: usize) -> NtStatus {
             if !dev_obj.is_null() {
                 let stack_size = (*dev_obj).stack_size.max(1);
 
-                // 1. Dispatch IRP_MJ_CLEANUP (cancels in-flight requests, notifies driver)
+                // 1. Dispatch IRP_MJ_CLEANUP
                 let cleanup_irp = IoAllocateIrp(stack_size, 0);
                 if !cleanup_irp.is_null() {
                     let stack = io_get_next_irp_stack_location(cleanup_irp);
@@ -249,7 +245,7 @@ pub unsafe extern "win64" fn ZwClose(handle: usize) -> NtStatus {
                     IoFreeIrp(cleanup_irp);
                 }
 
-                // 2. Dispatch IRP_MJ_CLOSE (closes file context)
+                // 2. Dispatch IRP_MJ_CLOSE
                 let close_irp = IoAllocateIrp(stack_size, 0);
                 if !close_irp.is_null() {
                     let stack = io_get_next_irp_stack_location(close_irp);
@@ -265,10 +261,4 @@ pub unsafe extern "win64" fn ZwClose(handle: usize) -> NtStatus {
     }
 
     ob_close_handle(handle)
-}
-
-#[no_mangle]
-pub unsafe extern "win64" fn ZwLoadDriver(driver_service_name: *mut UnicodeString) -> NtStatus {
-    kprintln!("[ZW] ZwLoadDriver: request to dynamically load driver at 0x{:p}", driver_service_name);
-    STATUS_SUCCESS
 }

@@ -1,10 +1,14 @@
 #![no_std]
 #![no_main]
 
+pub mod io;
 pub mod ke;
-pub mod loader;
-pub mod nt;
+pub mod ldr;
+pub mod mm;
+pub mod ob;
 pub mod ps;
+pub mod rtl;
+pub mod zw;
 
 use core::panic::PanicInfo;
 use purent_hal::{gdt, hlt_loop, kprintln, serial::SERIAL1};
@@ -12,10 +16,12 @@ use purent_ntdef::kpcr::{Kpcr, Kprcb, NtTib};
 use purent_ntdef::loader::{PureNtLoaderBlock, PURENT_LOADER_MAGIC};
 use purent_ntdef::object::{ObjectAttributes, GENERIC_READ, GENERIC_WRITE};
 use purent_ntdef::string::UnicodeString;
-use crate::nt::mm::{pmm_init, pool_init};
-use crate::nt::ob::ob_init;
-use crate::nt::zw::{ZwClose, ZwCreateFile, ZwWriteFile};
-use crate::nt::RtlInitUnicodeString;
+
+use crate::ldr::{load_fs_rec_driver, load_null_driver};
+use crate::mm::{pmm_init, pool_init};
+use crate::ob::ob_init;
+use crate::rtl::RtlInitUnicodeString;
+use crate::zw::{ZwClose, ZwCreateFile, ZwWriteFile};
 
 static mut BOOT_KPCR: Kpcr = Kpcr {
     nt_tib: NtTib {
@@ -103,22 +109,22 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
 
     // 7. Local APIC and Timer initialization
     purent_hal::apic_init();
-    kprintln!("[HAL] Enabling CPU interrupts (sti)...");
-    core::arch::asm!("sti", options(nomem, nostack));
+    kprintln!("[HAL] Enabling CPU interrupts via HAL cpu::sti()...");
+    purent_hal::cpu::sti();
 
     kprintln!("[IO] I/O Manager (Io) initialized.");
 
-    // 7. Load native binary drivers (null.sys and fs_rec.sys)
+    // 8. Load native binary drivers (null.sys and fs_rec.sys)
     kprintln!("\n--- [STAGE: LOADING NATIVE BINARY DRIVERS] ---");
-    let null_loaded = loader::load_null_driver();
-    let fs_rec_loaded = loader::load_fs_rec_driver();
+    let null_loaded = load_null_driver();
+    let fs_rec_loaded = load_fs_rec_driver();
     if null_loaded && fs_rec_loaded {
         kprintln!("--- [STAGE COMPLETE: ALL NATIVE DRIVERS ACTIVE] ---\n");
     } else {
         kprintln!("[WARN] One or more drivers failed to initialize.");
     }
 
-    // 8. Test NT System Calls (ZwCreateFile, ZwWriteFile, ZwClose)
+    // 9. Test NT System Calls (ZwCreateFile, ZwWriteFile, ZwClose)
     kprintln!("\n--- [STAGE: NT SYSTEM CALLS EXECUTION (Zw* API)] ---");
     let dev_null_u16: [u16; 13] = [
         '\\' as u16, 'D' as u16, 'e' as u16, 'v' as u16, 'i' as u16, 'c' as u16, 'e' as u16,
@@ -175,7 +181,7 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     }
     kprintln!("--- [STAGE COMPLETE: NT SYSTEM CALLS VERIFIED] ---\n");
 
-    // 9. Process Subsystem (Ps), Ring 3 User-Mode PE Process, and Preemptive Scheduler Verification
+    // 10. Process Subsystem (Ps), Ring 3 User-Mode PE Process, and Preemptive Scheduler Verification
     kprintln!("\n--- [STAGE: PS USER-MODE PE PROCESS LOADER & MULTI-THREADING] ---");
     let thread1 = ke::ps_create_system_thread(worker_thread_1, 1 as *mut _, "KernelWorker-1").expect("worker1");
     let thread2 = ke::ps_create_system_thread(worker_thread_2, 2 as *mut _, "KernelWorker-2").expect("worker2");
@@ -212,7 +218,7 @@ static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows
 
 unsafe extern "win64" fn worker_probe(_context: *mut core::ffi::c_void) {
     kprintln!("[PROBE-THREAD] Executing on re-allocated stack from NonPagedPool! Terminating cleanly...");
-    ke::ps_terminate_current_thread(0);
+    ps::ps_terminate_current_thread(0);
 }
 
 unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
@@ -227,7 +233,7 @@ unsafe extern "win64" fn worker_thread_1(context: *mut core::ffi::c_void) {
         kprintln!("[THREAD-{}] Task iteration {} finished at tick {} (preemption verified)", id, i, end_tick);
     }
     kprintln!("[THREAD-{}] Work finished cleanly. Calling ps_terminate_current_thread...", id);
-    ke::ps_terminate_current_thread(0);
+    ps::ps_terminate_current_thread(0);
 }
 
 unsafe extern "win64" fn worker_thread_2(context: *mut core::ffi::c_void) {
@@ -242,8 +248,9 @@ unsafe extern "win64" fn worker_thread_2(context: *mut core::ffi::c_void) {
         kprintln!("[THREAD-{}] Concurrent task iteration {} finished at tick {} (preemption verified)", id, i, end_tick);
     }
     kprintln!("[THREAD-{}] Concurrent work finished cleanly. Calling ps_terminate_current_thread...", id);
-    ke::ps_terminate_current_thread(0);
+    ps::ps_terminate_current_thread(0);
 }
+
 #[no_mangle]
 pub static _fltused: i32 = 0;
 

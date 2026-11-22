@@ -3,30 +3,21 @@
 
 use purent_hal::kprintln;
 use purent_ntdef::kpcr::ThreadState;
-use purent_ntdef::ps::{Peb, Teb, RtlUserProcessParameters};
+use purent_ntdef::ps::{Peb, RtlUserProcessParameters, Teb};
 use purent_ntdef::status::{NtStatus, STATUS_NO_MEMORY, STATUS_UNSUCCESSFUL};
 use purent_pe::PeView;
 
-use crate::nt::mm::{ExAllocatePoolWithTag, NonPagedPool};
+use crate::ke::arch::ki_user_thread_start_trampoline;
+use crate::ke::sched::{
+    DEFAULT_QUANTUM, KERNEL_STACK_SIZE, MAX_READY_THREADS, SCHED_QUEUE, STACK_TAG, THREAD_TAG,
+};
+use crate::mm::{
+    phys_to_virt, vmm_map_user_page, vmm_protect_user_page, ExAllocatePoolWithTag, NonPagedPool,
+    PMM, PTE_NX, PTE_PRESENT, PTE_USER, PTE_WRITABLE,
+};
 use crate::ps::process::{Process, Thread};
-use crate::ke::sched::{SCHED_QUEUE, KERNEL_STACK_SIZE, STACK_TAG, THREAD_TAG, DEFAULT_QUANTUM, MAX_READY_THREADS};
 
 pub const PROCESS_TAG: u32 = 0x636F7250; // 'Proc'
-
-#[unsafe(naked)]
-unsafe extern "win64" fn ki_user_thread_start_trampoline() {
-    core::arch::naked_asm!(
-        "sub rsp, 0x20", // 32 bytes Win64 shadow store (keeps RSP % 16 == 0)
-        "mov rcx, rbx", // entry_point
-        "mov rdx, rdi", // user_stack_top
-        "mov r8, rsi",  // teb_addr
-        "call {enter_user}",
-        "add rsp, 0x20",
-        "1: hlt",
-        "jmp 1b",
-        enter_user = sym crate::ke::enter_user_mode,
-    );
-}
 
 pub unsafe fn ps_create_user_process(
     pe_bytes: &[u8],
@@ -66,13 +57,13 @@ pub unsafe fn ps_create_user_process(
     let headers_pages = (headers_size + 4095) / 4096;
     for i in 0..headers_pages {
         let va = (image_base + i * 4096) as u64;
-        let frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-        core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(frame), 0, 4096);
-        crate::nt::mm::vmm_map_user_page(
+        let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+        core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
+        vmm_map_user_page(
             cr3,
             va,
             frame,
-            crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE,
+            PTE_PRESENT | PTE_USER | PTE_WRITABLE,
         )?;
     }
     if headers_size <= pe_bytes.len() {
@@ -93,13 +84,13 @@ pub unsafe fn ps_create_user_process(
         let sec_pages = page_aligned_size / 4096;
         for j in 0..sec_pages {
             let va = (sec_va + j * 4096) as u64;
-            let frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-            core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(frame), 0, 4096);
-            crate::nt::mm::vmm_map_user_page(
+            let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+            core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
+            vmm_map_user_page(
                 cr3,
                 va,
                 frame,
-                crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE,
+                PTE_PRESENT | PTE_USER | PTE_WRITABLE,
             )?;
         }
 
@@ -113,16 +104,16 @@ pub unsafe fn ps_create_user_process(
 
         let chars = sec.characteristics;
         let (protect_str, pte_flags) = if chars & 0x20000000 != 0 {
-            ("PAGE_EXECUTE_READ (RX)", crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER)
+            ("PAGE_EXECUTE_READ (RX)", PTE_PRESENT | PTE_USER)
         } else if chars & 0x80000000 != 0 {
-            ("PAGE_READWRITE (RW+NX)", crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX)
+            ("PAGE_READWRITE (RW+NX)", PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX)
         } else {
-            ("PAGE_READONLY (RO+NX)", crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_NX)
+            ("PAGE_READONLY (RO+NX)", PTE_PRESENT | PTE_USER | PTE_NX)
         };
 
         for j in 0..sec_pages {
             let va = (sec_va + j * 4096) as u64;
-            let _ = crate::nt::mm::vmm_protect_user_page(cr3, va, pte_flags);
+            let _ = vmm_protect_user_page(cr3, va, pte_flags);
         }
 
         kprintln!(
@@ -144,13 +135,13 @@ pub unsafe fn ps_create_user_process(
 
     // 2. Allocate and format Process Environment Block (PEB) at 0x0000000000450000
     let peb_addr = 0x0000000000450000usize;
-    let peb_frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-    core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(peb_frame), 0, 4096);
-    crate::nt::mm::vmm_map_user_page(
+    let peb_frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+    core::ptr::write_bytes(phys_to_virt::<u8>(peb_frame), 0, 4096);
+    vmm_map_user_page(
         cr3,
         peb_addr as u64,
         peb_frame,
-        crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX,
+        PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX,
     )?;
     let peb = peb_addr as *mut Peb;
 
@@ -181,13 +172,13 @@ pub unsafe fn ps_create_user_process(
 
     // 3. Allocate and format Thread Environment Block (TEB) at 0x0000000000460000
     let teb_addr = 0x0000000000460000usize;
-    let teb_frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-    core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(teb_frame), 0, 4096);
-    crate::nt::mm::vmm_map_user_page(
+    let teb_frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+    core::ptr::write_bytes(phys_to_virt::<u8>(teb_frame), 0, 4096);
+    vmm_map_user_page(
         cr3,
         teb_addr as u64,
         teb_frame,
-        crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX,
+        PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX,
     )?;
     let teb = teb_addr as *mut Teb;
 
@@ -197,13 +188,13 @@ pub unsafe fn ps_create_user_process(
     // Map 64 KiB (16 pages) for user stack
     for s in 0..16 {
         let va = (user_stack_base + s * 4096) as u64;
-        let frame = crate::nt::mm::PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-        core::ptr::write_bytes(crate::nt::mm::phys_to_virt::<u8>(frame), 0, 4096);
-        crate::nt::mm::vmm_map_user_page(
+        let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+        core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
+        vmm_map_user_page(
             cr3,
             va,
             frame,
-            crate::nt::mm::PTE_PRESENT | crate::nt::mm::PTE_USER | crate::nt::mm::PTE_WRITABLE | crate::nt::mm::PTE_NX,
+            PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX,
         )?;
     }
 
@@ -304,41 +295,3 @@ pub unsafe fn ps_create_user_process(
 
     Ok((proc_ptr, kthread as *mut _))
 }
-
-/// Executive Reaper: deallocates resources of a terminated thread
-/// - Frees the 16 KiB KernelStack
-/// - Rundown user-space structures (PEB, TEB, user stack, sections)
-/// - Rundown process handle table and deallocate Process object
-/// - Frees the thread object pool
-pub unsafe fn ps_reap_thread(thread: *mut purent_ntdef::kpcr::KThread) {
-    if thread.is_null() {
-        return;
-    }
-
-    let kstack = (*thread).stack_limit;
-    let initial_stack = (*thread).initial_stack;
-    if !kstack.is_null() {
-        crate::nt::mm::ExFreePoolWithTag(kstack, STACK_TAG);
-        kprintln!(
-            "[REAPER] Reaped KTHREAD 0x{:016X}: freed 16 KiB KernelStack [0x{:016X}..0x{:016X}]",
-            thread as usize,
-            kstack as usize,
-            initial_stack as usize
-        );
-    }
-
-    let teb = (*thread).teb;
-    if !teb.is_null() {
-        let proc = (*thread).process as *mut Process;
-        kprintln!("[REAPER] Process \"smss.exe\" (PID: 0x200) rundown: deallocated PEB (0x00450000), TEB (0x00460000), UserStack (0x00470000..0x00480000), and Sections (0x00400000..0x00405000)");
-        kprintln!("[REAPER] Process \"smss.exe\" handle table rundown: closed all user handles");
-        if !proc.is_null() {
-            crate::nt::mm::ExFreePoolWithTag(proc as *mut core::ffi::c_void, PROCESS_TAG);
-            kprintln!("[REAPER] Process object (EPROCESS 0x{:016X}) pool memory freed", proc as usize);
-        }
-    }
-
-    crate::nt::mm::ExFreePoolWithTag(thread as *mut core::ffi::c_void, THREAD_TAG);
-    kprintln!("[REAPER] KTHREAD 0x{:016X} object pool freed. Rundown complete.", thread as usize);
-}
-

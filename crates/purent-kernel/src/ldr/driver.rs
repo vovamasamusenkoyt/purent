@@ -8,10 +8,53 @@ use purent_ntdef::{
     string::UnicodeString,
 };
 use purent_pe::{PeView, IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_REL_BASED_DIR64};
-use crate::nt::*;
 
-static NULL_SYS_IMAGE: &[u8] = include_bytes!("../../../refs/win7_7601_x64/binaries/null.sys");
-static FS_REC_SYS_IMAGE: &[u8] = include_bytes!("../../../refs/win7_7601_x64/binaries/fs_rec.sys");
+use crate::io::{
+    IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
+};
+use crate::mm::{ExAllocatePoolWithTag, ExFreePoolWithTag};
+use crate::zw::{ZwClose, ZwCreateFile, ZwLoadDriver};
+
+// Kernel routines resolved in IAT
+extern "win64" {
+    fn RtlInitUnicodeString(destination_string: *mut UnicodeString, source_string: *const u16);
+    fn IoDeleteDevice(device_object: *mut purent_ntdef::io::DeviceObject);
+    fn MmPageEntireDriver(address: *mut core::ffi::c_void);
+    fn IofCompleteRequest(irp: *mut purent_ntdef::io::Irp, priority_boost: i8);
+    fn IoCreateDevice(
+        driver_object: *mut DriverObject,
+        device_extension_size: u32,
+        device_name: *mut UnicodeString,
+        device_type: u32,
+        device_characteristics: u32,
+        exclusive: u8,
+        device_object: *mut *mut purent_ntdef::io::DeviceObject,
+    ) -> NtStatus;
+    fn KeBugCheckEx(
+        bug_check_code: u32,
+        bug_check_parameter1: usize,
+        bug_check_parameter2: usize,
+        bug_check_parameter3: usize,
+        bug_check_parameter4: usize,
+    ) -> !;
+    fn IoDeleteSymbolicLink(symbolic_link_name: *mut UnicodeString) -> NtStatus;
+    fn IoUnregisterFileSystem(device_object: *mut purent_ntdef::io::DeviceObject);
+    fn IoRegisterFileSystem(device_object: *mut purent_ntdef::io::DeviceObject);
+    fn KeLeaveCriticalRegion();
+    fn KeEnterCriticalRegion();
+    fn KeSetEvent(event: *mut core::ffi::c_void, increment: i32, wait: u8) -> i32;
+    fn KeInitializeEvent(event: *mut core::ffi::c_void, r#type: u32, state: u8);
+    fn KeWaitForSingleObject(
+        object: *mut core::ffi::c_void,
+        wait_reason: u32,
+        wait_mode: i8,
+        alertable: u8,
+        timeout: *mut i64,
+    ) -> NtStatus;
+}
+
+static NULL_SYS_IMAGE: &[u8] = include_bytes!("../../../../refs/win7_7601_x64/binaries/null.sys");
+static FS_REC_SYS_IMAGE: &[u8] = include_bytes!("../../../../refs/win7_7601_x64/binaries/fs_rec.sys");
 
 #[repr(C, align(4096))]
 struct DriverMemory([u8; 64 * 1024]);

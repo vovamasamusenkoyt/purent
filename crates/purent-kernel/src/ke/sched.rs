@@ -1,14 +1,15 @@
 //! PureNT Thread Scheduler and Context Switch Engine
 //! Implements NT 6.1 x64 (Windows 7 SP1) scheduler mechanics matching ntoskrnl.exe
 
+use core::sync::atomic::{AtomicUsize, Ordering};
 use purent_hal::kprintln;
 use purent_ntdef::{
     kpcr::{KProcess, KThread, ThreadState},
     status::{NtStatus, STATUS_NO_MEMORY},
 };
-use crate::nt::mm::{ExAllocatePoolWithTag, NonPagedPool};
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::ke::arch::{ki_thread_start_trampoline, KiSwapContext};
+use crate::mm::{ExAllocatePoolWithTag, NonPagedPool};
 
 pub const THREAD_TAG: u32 = 0x64726854; // 'Thrd'
 pub const STACK_TAG: u32 = 0x6B745354;  // 'TStk'
@@ -60,140 +61,6 @@ pub static SCHED_QUEUE: purent_hal::SpinLock<SchedulerQueue> = purent_hal::SpinL
     ready_count: 0,
     current_index: 0,
 });
-
-#[unsafe(naked)]
-unsafe extern "win64" fn ki_thread_start_trampoline() {
-    core::arch::naked_asm!(
-        "sub rsp, 0x20", // 32 bytes Win64 shadow store (keeps RSP % 16 == 0)
-        "mov rcx, rdi",  // context passed in RDI -> Windows x64 RCX argument 1
-        "call rbx",      // routine passed in RBX
-        "add rsp, 0x20",
-        "1: hlt",
-        "jmp 1b",
-    );
-}
-
-/// Exact replica of Windows NT 6.1 x64 KiSwapContext / SwapContext
-/// Saves XMM6-XMM15, callee-saved GPRs, swaps RSP between KTHREAD->KernelStack (offset 0x38),
-/// updates KPCR.CurrentPrcb.CurrentThread (gs:[0x188]) and TSS RSP0 (PRCB+0x28).
-#[unsafe(naked)]
-#[allow(non_snake_case)]
-pub unsafe extern "win64" fn KiSwapContext(
-    current_thread: *mut KThread,
-    next_thread: *mut KThread,
-) {
-    core::arch::naked_asm!(
-        // Disable interrupts during atomic context swap
-        "cli",
-
-        // 1. Allocate 0x138 stack frame (matching ntoskrnl KiSwapContext)
-        "sub rsp, 0x138",
-
-        // 2. Save non-volatile XMM registers (XMM6 - XMM15)
-        "movdqu [rsp + 0x30], xmm6",
-        "movdqu [rsp + 0x40], xmm7",
-        "movdqu [rsp + 0x50], xmm8",
-        "movdqu [rsp + 0x60], xmm9",
-        "movdqu [rsp + 0x70], xmm10",
-        "movdqu [rsp + 0x80], xmm11",
-        "movdqu [rsp + 0xA0], xmm12",
-        "movdqu [rsp + 0xB0], xmm13",
-        "movdqu [rsp + 0xC0], xmm14",
-        "movdqu [rsp + 0xD0], xmm15",
-
-        // 3. Save callee-saved GPRs (RBX, RDI, RSI, R12, R13, R14, R15)
-        "mov [rsp + 0x100], rbx",
-        "mov [rsp + 0x108], rdi",
-        "mov [rsp + 0x110], rsi",
-        "mov [rsp + 0x118], r12",
-        "mov [rsp + 0x120], r13",
-        "mov [rsp + 0x128], r14",
-        "mov [rsp + 0x130], r15",
-
-        // 4. Set up registers for SwapContext:
-        // RDI = CurrentThread, RSI = NextThread, RBX = KPCR.CurrentPrcb (gs:[0x20])
-        "mov rdi, rcx",
-        "mov rsi, rdx",
-        "mov rbx, gs:[0x20]",
-
-        // 5. Swap Stacks:
-        // Save current RSP into CurrentThread->KernelStack (offset 0x38)
-        "mov [rdi + 0x38], rsp",
-        // Load new RSP from NextThread->KernelStack (offset 0x38)
-        "mov rsp, [rsi + 0x38]",
-
-        // 6. Update Prcb.CurrentThread (gs:[0x188]) to NextThread
-        "mov gs:[0x188], rsi",
-
-        // 7. Update Prcb.RspBase (TSS RSP0 target at PRCB + 0x28) to NextThread->InitialStack
-        "mov rax, [rsi + 0x28]",
-        "test rbx, rbx",
-        "jz 1f",
-        "mov [rbx + 0x28], rax",
-        "1:",
-        "push rsi",
-        "push rdi",
-        "sub rsp, 0x20", // 32 bytes shadow store for Win64 ABI
-        "mov rcx, rax",
-        "call {set_rsp0}",
-        "add rsp, 0x20",
-        "pop rdi",
-        "pop rsi",
-
-        // 8. Update thread states: CurrentThread = Ready (1), NextThread = Running (2)
-        "mov byte ptr [rdi + 0x49], 1",
-        "mov byte ptr [rsi + 0x49], 2",
-        "inc dword ptr [rsi + 0x138]",
-
-        // 9. Check if CR3 needs reloading (NextThread->Process vs CurrentThread->Process)
-        "mov rax, [rsi + 0x70]",
-        "cmp rax, [rdi + 0x70]",
-        "je 2f",
-        "test rax, rax",
-        "jz 2f",
-        "mov rdx, [rax + 0x28]",
-        "mov cr3, rdx",
-        "2:",
-
-        // 10. Update IA32_KERNEL_GS_BASE if NextThread has a TEB (offset 0xB8)
-        "mov r8, [rsi + 0x0B8]",
-        "test r8, r8",
-        "jz 3f",
-        "mov ecx, 0xC0000102",
-        "mov eax, r8d",
-        "shr r8, 32",
-        "mov edx, r8d",
-        "wrmsr",
-        "3:",
-
-        // 11. Restore GPRs from new thread's stack
-        "mov rbx, [rsp + 0x100]",
-        "mov rdi, [rsp + 0x108]",
-        "mov rsi, [rsp + 0x110]",
-        "mov r12, [rsp + 0x118]",
-        "mov r13, [rsp + 0x120]",
-        "mov r14, [rsp + 0x128]",
-        "mov r15, [rsp + 0x130]",
-
-        // 11. Restore XMM registers
-        "movdqu xmm6, [rsp + 0x30]",
-        "movdqu xmm7, [rsp + 0x40]",
-        "movdqu xmm8, [rsp + 0x50]",
-        "movdqu xmm9, [rsp + 0x60]",
-        "movdqu xmm10, [rsp + 0x70]",
-        "movdqu xmm11, [rsp + 0x80]",
-        "movdqu xmm12, [rsp + 0xA0]",
-        "movdqu xmm13, [rsp + 0xB0]",
-        "movdqu xmm14, [rsp + 0xC0]",
-        "movdqu xmm15, [rsp + 0xD0]",
-
-        // 12. Deallocate stack frame and return to thread's instruction stream!
-        "add rsp, 0x138",
-        "sti",
-        "ret",
-        set_rsp0 = sym purent_hal::gdt::set_rsp0,
-    );
-}
 
 pub unsafe fn sched_init() {
     INITIAL_PROCESS.directory_table_base = purent_hal::cpu::read_cr3();
@@ -354,62 +221,3 @@ pub unsafe fn ke_wait_for_single_object(thread: *mut KThread) {
         ki_yield();
     }
 }
-
-/// Terminate the currently running thread:
-/// - Mark state = Terminated
-/// - Set DispatcherHeader SignalState = 1
-/// - Remove from SCHED_QUEUE ready threads
-/// - Switch immediately to next ready thread via KiSwapContext
-pub unsafe fn ps_terminate_current_thread(exit_status: u32) -> ! {
-    let curr = {
-        let q = SCHED_QUEUE.lock();
-        q.ready_threads[q.current_index]
-    };
-
-    kprintln!("[PS] Thread 0x{:016X} terminating (ExitStatus: 0x{:08X}). Removing from Ready Queue...", curr as usize, exit_status);
-
-    let next = {
-        let mut q = SCHED_QUEUE.lock();
-        (*curr).state = ThreadState::Terminated as u8;
-        (*curr).header[4] = 1; // SignalState = 1 in DispatcherHeader (offset 0x04)
-
-        // Remove curr from ready_threads list
-        let mut found_idx = None;
-        for i in 0..q.ready_count {
-            if q.ready_threads[i] == curr {
-                found_idx = Some(i);
-                break;
-            }
-        }
-
-        if let Some(idx) = found_idx {
-            for j in idx..(q.ready_count - 1) {
-                q.ready_threads[j] = q.ready_threads[j + 1];
-            }
-            let last_idx = q.ready_count - 1;
-            q.ready_threads[last_idx] = core::ptr::null_mut();
-            q.ready_count = last_idx;
-        }
-
-        if q.current_index >= q.ready_count {
-            q.current_index = 0;
-        }
-
-        q.ready_threads[q.current_index]
-    };
-
-    let switch_count = CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    kprintln!(
-        "[TERMINATE-EXIT] KTHREAD 0x{:016X} terminated -> Switching to 0x{:016X} (Context Switch #{})",
-        curr as usize,
-        next as usize,
-        switch_count
-    );
-    KiSwapContext(curr, next);
-
-    // Will never be scheduled again
-    loop {
-        core::arch::asm!("hlt", options(nomem, nostack));
-    }
-}
-

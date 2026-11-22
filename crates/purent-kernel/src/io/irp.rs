@@ -1,11 +1,7 @@
-//! NT I/O Subsystem & IRP Dispatch Engine
+//! NT I/O Request Packet (IRP) Allocation and Construction
 
-use purent_hal::kprintln;
-use purent_ntdef::{
-    io::{DeviceObject, IoStackLocation, Irp},
-    status::{NtStatus, STATUS_NOT_SUPPORTED},
-};
-use crate::nt::mm::{ExAllocatePoolWithTag, ExFreePoolWithTag, NonPagedPool};
+use purent_ntdef::io::{DeviceObject, IoStackLocation, IoStatusBlock, Irp, IRP_MJ_DEVICE_CONTROL};
+use crate::mm::{ExAllocatePoolWithTag, ExFreePoolWithTag, NonPagedPool};
 
 pub const IRP_TAG: u32 = 0x20707249; // 'Irp '
 
@@ -59,53 +55,6 @@ pub unsafe fn io_get_current_irp_stack_location(irp: *mut Irp) -> *mut IoStackLo
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn IoCallDriver(
-    device_object: *mut DeviceObject,
-    irp: *mut Irp,
-) -> NtStatus {
-    if device_object.is_null() || irp.is_null() {
-        return -1073741811; // STATUS_INVALID_PARAMETER
-    }
-
-    // Advance stack location
-    (*irp).current_location -= 1;
-    if (*irp).current_location <= 0 {
-        kprintln!("[IO] FATAL: IRP stack location underflow!");
-        return -1073741811;
-    }
-
-    let stack = io_get_current_irp_stack_location(irp);
-    (*irp).current_stack_location = stack;
-    (*stack).device_object = device_object;
-
-    let driver_object = (*device_object).driver_object;
-    if driver_object.is_null() {
-        return -1073741811;
-    }
-
-    let major_fn = (*stack).major_function as usize;
-    if major_fn >= (*driver_object).major_function.len() {
-        return STATUS_NOT_SUPPORTED;
-    }
-
-    let routine_ptr = (*driver_object).major_function[major_fn];
-    if routine_ptr.is_null() {
-        kprintln!("[IO] Major function 0x{:X} not implemented by driver", major_fn);
-        return STATUS_NOT_SUPPORTED;
-    }
-
-    let dispatch_routine: unsafe extern "win64" fn(*mut DeviceObject, *mut Irp) -> NtStatus =
-        core::mem::transmute(routine_ptr);
-
-    dispatch_routine(device_object, irp)
-}
-
-#[no_mangle]
-pub unsafe extern "win64" fn IofCallDriver(device_object: *mut DeviceObject, irp: *mut Irp) -> NtStatus {
-    IoCallDriver(device_object, irp)
-}
-
-#[no_mangle]
 pub unsafe extern "win64" fn IoBuildDeviceIoControlRequest(
     io_control_code: u32,
     device_object: *mut DeviceObject,
@@ -115,7 +64,7 @@ pub unsafe extern "win64" fn IoBuildDeviceIoControlRequest(
     output_buffer_length: u32,
     _internal_device_io_control: u8,
     _event: *mut core::ffi::c_void,
-    _io_status_block: *mut purent_ntdef::io::IoStatusBlock,
+    _io_status_block: *mut IoStatusBlock,
 ) -> *mut Irp {
     let stack_size = if !device_object.is_null() {
         (*device_object).stack_size.max(1)
@@ -126,7 +75,7 @@ pub unsafe extern "win64" fn IoBuildDeviceIoControlRequest(
     if !irp.is_null() {
         (*irp).user_buffer = output_buffer;
         let stack = io_get_next_irp_stack_location(irp);
-        (*stack).major_function = purent_ntdef::io::IRP_MJ_DEVICE_CONTROL;
+        (*stack).major_function = IRP_MJ_DEVICE_CONTROL;
         (*stack).device_object = device_object;
         (*stack).parameters[0] = output_buffer_length as usize;
         (*stack).parameters[1] = input_buffer_length as usize;
@@ -143,7 +92,7 @@ pub unsafe extern "win64" fn IoBuildSynchronousFsdRequest(
     length: u32,
     _starting_offset: *mut i64,
     _event: *mut core::ffi::c_void,
-    _io_status_block: *mut purent_ntdef::io::IoStatusBlock,
+    _io_status_block: *mut IoStatusBlock,
 ) -> *mut Irp {
     let stack_size = if !device_object.is_null() {
         (*device_object).stack_size.max(1)
