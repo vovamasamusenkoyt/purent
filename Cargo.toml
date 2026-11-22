@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/purent-ntdef",
+    "crates/purent-pe",
+    "crates/purent-boot",
+    "crates/purent-hal",
+    "crates/purent-kernel",
+    "xtask",
+]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

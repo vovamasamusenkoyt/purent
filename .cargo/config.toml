@@ -1,0 +1,8 @@
+[alias]
+qemu = "run --package xtask -- run"
+build-all = "run --package xtask -- build"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Tcrates/purent-kernel/linker.ld",
+]

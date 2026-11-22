@@ -1,0 +1,8 @@
+[package]
+name = "purent-boot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+purent-ntdef = { path = "../purent-ntdef" }
+purent-pe = { path = "../purent-pe" }

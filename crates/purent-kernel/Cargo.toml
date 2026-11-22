@@ -1,0 +1,15 @@
+[package]
+name = "purent-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+purent-ntdef = { path = "../purent-ntdef" }
+purent-hal = { path = "../purent-hal" }
+purent-pe = { path = "../purent-pe" }
+
+[[bin]]
+name = "purentoskrnl"
+path = "src/main.rs"
+test = false
+bench = false
