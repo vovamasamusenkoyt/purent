@@ -126,6 +126,8 @@ fn run() {
             uefi_binary.to_str().unwrap(),
             "-drive",
             &format!("format=raw,file=fat:rw:{}", esp_dir.display()),
+            "-vga",
+            "std",
             "-serial",
             "stdio",
             "-m",
@@ -139,11 +141,95 @@ fn run() {
     println!("==> [PureNT xtask] QEMU exited with {:?}", status);
 }
 
+fn screenshot() {
+    build();
+
+    let root = project_root();
+    let esp_dir = root.join("target/esp");
+    let uefi_binary = esp_dir.join("EFI/BOOT/BOOTX64.EFI");
+    let ovmf_path = "/usr/share/edk2/x64/OVMF.4m.fd";
+    let sock_path = "/tmp/qemu_mon_xtask.sock";
+    let ppm_path = "/tmp/purent_desktop.ppm";
+    let png_path = root.join("target/desktop.png");
+
+    let _ = fs::remove_file(sock_path);
+    let _ = fs::remove_file(ppm_path);
+
+    println!("==> [PureNT xtask] Launching QEMU for screen capture...");
+    let mut child = Command::new("qemu-system-x86_64")
+        .args([
+            "-bios",
+            ovmf_path,
+            "-kernel",
+            uefi_binary.to_str().unwrap(),
+            "-drive",
+            &format!("format=raw,file=fat:rw:{}", esp_dir.display()),
+            "-vga",
+            "std",
+            "-display",
+            "none",
+            "-serial",
+            "file:/tmp/purent_serial.log",
+            "-monitor",
+            &format!("unix:{},server,nowait", sock_path),
+            "-m",
+            "512M",
+        ])
+        .spawn()
+        .expect("Failed to launch QEMU");
+
+    // Wait for QEMU socket to appear and GUI desktop to fully render
+    for _ in 0..50 {
+        if Path::new(sock_path).exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Send screendump command via unix socket
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    if let Ok(mut stream) = UnixStream::connect(sock_path) {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut buf = [0u8; 1024];
+        let _ = stream.read(&mut buf);
+        let _ = stream.write_all(format!("screendump {}\n", ppm_path).as_bytes());
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    if Path::new(ppm_path).exists() {
+        // Convert PPM to PNG via python3 PIL
+        let py_status = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "from PIL import Image; Image.open('{}').save('{}')",
+                    ppm_path,
+                    png_path.display()
+                ),
+            ])
+            .status();
+
+        if py_status.map(|s| s.success()).unwrap_or(false) {
+            println!("==> [PureNT xtask] Screenshot captured: {}", png_path.display());
+        } else {
+            println!("==> [PureNT xtask] Raw PPM screenshot saved at {}", ppm_path);
+        }
+    } else {
+        eprintln!("[ERROR] screendump failed to generate {}", ppm_path);
+    }
+}
+
 fn main() {
     let arg = env::args().nth(1).unwrap_or_else(|| "build".into());
     match arg.as_str() {
         "build" => build(),
         "run" => run(),
-        other => eprintln!("Unknown command: {}. Available: build, run", other),
+        "screenshot" => screenshot(),
+        other => eprintln!("Unknown command: {}. Available: build, run, screenshot", other),
     }
 }

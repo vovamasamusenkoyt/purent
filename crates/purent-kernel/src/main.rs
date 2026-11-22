@@ -8,6 +8,7 @@ pub mod mm;
 pub mod ob;
 pub mod ps;
 pub mod rtl;
+pub mod win32k;
 pub mod zw;
 
 use core::panic::PanicInfo;
@@ -111,6 +112,11 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     purent_hal::apic_init();
     kprintln!("[HAL] Enabling CPU interrupts via HAL cpu::sti()...");
     purent_hal::cpu::sti();
+
+    // 8. Initialize Windows 7 Graphical Subsystem & Window Manager (win32k)
+    kprintln!("\n--- [STAGE: WIN32K GRAPHICAL DESKTOP & WINDOW MANAGER] ---");
+    win32k::win32k_init(&ldr.framebuffer);
+    kprintln!("--- [STAGE COMPLETE: WIN32K INITIALIZED] ---\n");
 
     kprintln!("[IO] I/O Manager (Io) initialized.");
 

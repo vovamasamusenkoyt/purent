@@ -32,6 +32,34 @@ static mut LOADER_BLOCK: PureNtLoaderBlock = PureNtLoaderBlock {
 };
 
 #[repr(C)]
+pub struct EfiGraphicsOutputModeInformation {
+    pub version: u32,
+    pub horizontal_resolution: u32,
+    pub vertical_resolution: u32,
+    pub pixel_format: u32,
+    pub pixel_information: [u32; 4],
+    pub pixels_per_scan_line: u32,
+}
+
+#[repr(C)]
+pub struct EfiGraphicsOutputProtocolMode {
+    pub max_mode: u32,
+    pub mode: u32,
+    pub info: *mut EfiGraphicsOutputModeInformation,
+    pub size_of_info: usize,
+    pub frame_buffer_base: u64,
+    pub frame_buffer_size: usize,
+}
+
+#[repr(C)]
+pub struct EfiGraphicsOutputProtocol {
+    pub query_mode: usize,
+    pub set_mode: usize,
+    pub blt: usize,
+    pub mode: *mut EfiGraphicsOutputProtocolMode,
+}
+
+#[repr(C)]
 pub struct EfiGuid {
     pub data1: u32,
     pub data2: u16,
@@ -293,7 +321,90 @@ pub extern "efiapi" fn efi_main(
     print_hex_u64(pt_phys);
     serial_print("\n");
 
-    // 4. Fill LOADER_BLOCK
+    // 4. Fill LOADER_BLOCK & Query GOP
+    let bs_words = bs as *const usize;
+    // Connect all controllers first to ensure GOP and PCI devices are bound
+    let lhb_fn: unsafe extern "efiapi" fn(u32, *const EfiGuid, *mut core::ffi::c_void, *mut usize, *mut *mut *mut core::ffi::c_void) -> usize =
+        unsafe { core::mem::transmute(*bs_words.add(39)) }; // 0x138 / 8 = 39
+    let cc_fn: unsafe extern "efiapi" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *mut core::ffi::c_void, bool) -> usize =
+        unsafe { core::mem::transmute(*bs_words.add(33)) }; // 0x108 / 8 = 33
+
+    let mut all_handles_count = 0usize;
+    let mut all_handles_buf: *mut *mut core::ffi::c_void = core::ptr::null_mut();
+    unsafe {
+        let st = lhb_fn(0, core::ptr::null(), core::ptr::null_mut(), &mut all_handles_count, &mut all_handles_buf);
+        serial_print("[BOOT] All handles count: ");
+        print_hex_u64(all_handles_count as u64);
+        serial_print(", status: 0x");
+        print_hex_u64(st as u64);
+        serial_print("\n");
+        if all_handles_count > 0 && !all_handles_buf.is_null() {
+            for i in 0..all_handles_count {
+                let h = *all_handles_buf.add(i);
+                cc_fn(h, core::ptr::null_mut(), core::ptr::null_mut(), true);
+            }
+        }
+    }
+
+    // Find any handle that has GraphicsOutput protocol
+    let pph_fn: unsafe extern "efiapi" fn(*mut core::ffi::c_void, *mut *mut *const EfiGuid, *mut usize) -> usize =
+        unsafe { core::mem::transmute(*bs_words.add(38)) }; // 0x130 / 8 = 38
+    unsafe {
+        for i in 0..all_handles_count {
+            let h = *all_handles_buf.add(i);
+            let mut proto_buf: *mut *const EfiGuid = core::ptr::null_mut();
+            let mut proto_count = 0usize;
+            if pph_fn(h, &mut proto_buf, &mut proto_count) == 0 && proto_count > 0 && !proto_buf.is_null() {
+                for p in 0..proto_count {
+                    let guid_ptr = *proto_buf.add(p);
+                    if !guid_ptr.is_null() {
+                        let d1 = (*guid_ptr).data1;
+                        if d1 == 0x9042a9de {
+                            serial_print("[BOOT] FOUND GOP on handle: 0x");
+                            print_hex_u64(h as u64);
+                            serial_print("\n");
+                            let hp_fn: unsafe extern "efiapi" fn(*mut core::ffi::c_void, *const EfiGuid, *mut *mut core::ffi::c_void) -> usize =
+                                core::mem::transmute(*bs_words.add(19)); // 0x98 / 8 = 19
+                            let mut gop_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+                            let hp_status = hp_fn(h, guid_ptr, &mut gop_ptr);
+                            if hp_status == 0 && !gop_ptr.is_null() {
+                                let gop = gop_ptr as *mut EfiGraphicsOutputProtocol;
+                                let mode = (*gop).mode;
+                                if !mode.is_null() {
+                                    let info = (*mode).info;
+                                    let fb_base = (*mode).frame_buffer_base;
+                                    let fb_size = (*mode).frame_buffer_size;
+                                    let (w, h, stride, fmt) = if !info.is_null() {
+                                        ((*info).horizontal_resolution, (*info).vertical_resolution, (*info).pixels_per_scan_line, (*info).pixel_format)
+                                    } else {
+                                        (1024, 768, 1024, 1)
+                                    };
+                                    serial_print("[BOOT] GOP active: ");
+                                    print_hex_u64(w as u64);
+                                    serial_print("x");
+                                    print_hex_u64(h as u64);
+                                    serial_print(", FB Base: 0x");
+                                    print_hex_u64(fb_base);
+                                    serial_print(", Size: 0x");
+                                    print_hex_u64(fb_size as u64);
+                                    serial_print("\n");
+
+                                    LOADER_BLOCK.framebuffer.base_address = fb_base;
+                                    LOADER_BLOCK.framebuffer.size = fb_size;
+                                    LOADER_BLOCK.framebuffer.width = w;
+                                    LOADER_BLOCK.framebuffer.height = h;
+                                    LOADER_BLOCK.framebuffer.pixels_per_scan_line = stride;
+                                    LOADER_BLOCK.framebuffer.pixel_format = fmt;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     unsafe {
         LOADER_BLOCK.kernel_physical_base = kernel_phys;
         LOADER_BLOCK.kernel_virtual_base = 0xFFFFF80000200000;

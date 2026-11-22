@@ -133,9 +133,14 @@ pub unsafe extern "win64" fn ZwWriteFile(
         let slice = core::slice::from_raw_parts(buffer as *const u8, length as usize);
         if let Ok(s) = core::str::from_utf8(slice) {
             purent_hal::kprint!("{}", s);
+            crate::win32k::win32k_console_write(s);
         } else {
             for &b in slice {
                 purent_hal::kprint!("{}", b as char);
+                let char_buf = [b];
+                if let Ok(s) = core::str::from_utf8(&char_buf) {
+                    crate::win32k::win32k_console_write(s);
+                }
             }
         }
         (*io_status_block).status = STATUS_SUCCESS;
