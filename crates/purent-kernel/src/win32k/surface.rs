@@ -79,8 +79,8 @@ impl Surface {
     pub fn fill_rect(&mut self, rect: Rect, color: u32) {
         let x1 = rect.x.max(0) as u32;
         let y1 = rect.y.max(0) as u32;
-        let x2 = (rect.right()).min(self.width as i32) as u32;
-        let y2 = (rect.bottom()).min(self.height as i32) as u32;
+        let x2 = rect.right().clamp(0, self.width as i32) as u32;
+        let y2 = rect.bottom().clamp(0, self.height as i32) as u32;
 
         if x1 >= x2 || y1 >= y2 {
             return;
@@ -98,6 +98,28 @@ impl Surface {
         }
     }
 
+    /// Copies an opaque surface into this surface, clipping to the destination.
+    ///
+    /// The source and destination buffers must not overlap.
+    pub unsafe fn blit_opaque(&mut self, source: &Surface, x: i32, y: i32) {
+        let target = Rect::new(x, y, source.width, source.height);
+        let bounds = Rect::new(0, 0, self.width, self.height);
+        let Some(clipped) = target.intersect(&bounds) else {
+            return;
+        };
+        let source_x = (clipped.x - x) as usize;
+        let source_y = (clipped.y - y) as usize;
+        for row in 0..clipped.height as usize {
+            let src = (source_y + row) * source.stride as usize + source_x;
+            let dst = (clipped.y as usize + row) * self.stride as usize + clipped.x as usize;
+            core::ptr::copy_nonoverlapping(
+                source.buffer.add(src),
+                self.buffer.add(dst),
+                clipped.width as usize,
+            );
+        }
+    }
+
     pub fn draw_rect(&mut self, rect: Rect, color: u32) {
         if rect.width == 0 || rect.height == 0 {
             return;
@@ -112,8 +134,8 @@ impl Surface {
     pub fn draw_gradient_h(&mut self, rect: Rect, start_color: u32, end_color: u32) {
         let x1 = rect.x.max(0) as u32;
         let y1 = rect.y.max(0) as u32;
-        let x2 = (rect.right()).min(self.width as i32) as u32;
-        let y2 = (rect.bottom()).min(self.height as i32) as u32;
+        let x2 = rect.right().clamp(0, self.width as i32) as u32;
+        let y2 = rect.bottom().clamp(0, self.height as i32) as u32;
 
         if x1 >= x2 || y1 >= y2 || rect.width == 0 {
             return;
@@ -149,8 +171,8 @@ impl Surface {
     pub fn draw_gradient_v(&mut self, rect: Rect, start_color: u32, end_color: u32) {
         let x1 = rect.x.max(0) as u32;
         let y1 = rect.y.max(0) as u32;
-        let x2 = (rect.right()).min(self.width as i32) as u32;
-        let y2 = (rect.bottom()).min(self.height as i32) as u32;
+        let x2 = rect.right().clamp(0, self.width as i32) as u32;
+        let y2 = rect.bottom().clamp(0, self.height as i32) as u32;
 
         if x1 >= x2 || y1 >= y2 || rect.height == 0 {
             return;

@@ -4,9 +4,15 @@
 use super::font::FONT_WIDTH;
 use super::surface::{Rect, Surface};
 use super::wnd::Window;
+use crate::mm::pool::{ExAllocatePoolWithTag, NonPagedPool};
 
 pub const CONSOLE_COLS: usize = 65;
 pub const CONSOLE_ROWS: usize = 18;
+
+const TEXT_X: i32 = 10;
+const TEXT_Y: i32 = 32;
+const TEXT_WIDTH: u32 = 528;
+const TEXT_HEIGHT: u32 = 288;
 
 static SCROLL_UP: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_up.raw"));
 static SCROLL_DOWN: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/theme/scroll_down.raw"));
@@ -21,15 +27,26 @@ pub struct ConsoleWindow {
     pub buffer: [[u8; CONSOLE_COLS]; CONSOLE_ROWS],
     pub cursor_col: usize,
     pub cursor_row: usize,
+    text_surface: Surface,
+    text_dirty: bool,
 }
 
 impl ConsoleWindow {
-    pub fn new(x: i32, y: i32) -> Self {
+    pub fn new(x: i32, y: i32) -> Option<Self> {
+        // The console and its surface live for the lifetime of Win32k.
+        let text_surface = unsafe {
+            let bytes = (TEXT_WIDTH * TEXT_HEIGHT) as usize * core::mem::size_of::<u32>();
+            let pixels = ExAllocatePoolWithTag(NonPagedPool, bytes, u32::from_le_bytes(*b"ConS"));
+            if pixels.is_null() {
+                return None;
+            }
+            Surface::from_raw(pixels.cast(), TEXT_WIDTH, TEXT_HEIGHT, TEXT_WIDTH)
+        };
         // Authentic Windows 7 565x347 window geometry
         let outer_w = 565;
         let outer_h = 347;
 
-        Self {
+        Some(Self {
             window: Window::new(
                 0x1001,
                 "", // Clean Aero glass titlebar matching reference screenshot
@@ -38,16 +55,20 @@ impl ConsoleWindow {
             buffer: [[b' '; CONSOLE_COLS]; CONSOLE_ROWS],
             cursor_col: 0,
             cursor_row: 0,
-        }
+            text_surface,
+            text_dirty: true,
+        })
     }
 
     pub fn clear(&mut self) {
         self.buffer = [[b' '; CONSOLE_COLS]; CONSOLE_ROWS];
         self.cursor_col = 0;
         self.cursor_row = 0;
+        self.text_dirty = true;
     }
 
     pub fn write_char(&mut self, ch: u8) {
+        self.text_dirty = true;
         match ch {
             b'\r' => {
                 self.cursor_col = 0;
@@ -101,39 +122,42 @@ impl ConsoleWindow {
         self.cursor_row = CONSOLE_ROWS - 1;
     }
 
-    /// Renders the complete console window matching the reference screenshot pixel-for-pixel
-    pub fn draw(&self, surface: &mut Surface) {
-        let rx = self.window.rect.x;
-        let ry = self.window.rect.y;
+    fn rasterize_text(&mut self) {
+        let surface = &mut self.text_surface;
+        surface.fill_rect(Rect::new(0, 0, TEXT_WIDTH, TEXT_HEIGHT), 0xFF000000);
 
-        // 1. Draw outer frosted Aero Glass frame
-        self.window.draw_frame(surface);
-
-        // 2. Pure Black Console Text Area (x = rx + 10..rx + 538, y = ry + 32..ry + 320)
-        surface.fill_rect(Rect::new(rx + 10, ry + 32, 528, 288), 0xFF000000);
-
-        // 3. Render character matrix (matching authentic 8x12 font pitch and 0xFFC0C0C0 color)
-        let start_x = rx + 10;
-        let start_y = ry + 33;
         let line_height = 13;
-
-        for r in 0..CONSOLE_ROWS {
-            let row_y = start_y + (r as i32 * line_height);
-            for c in 0..CONSOLE_COLS {
-                let col_x = start_x + (c * FONT_WIDTH) as i32;
-                let ch = self.buffer[r][c] as char;
-                if ch != ' ' {
-                    surface.draw_char(col_x, row_y, ch, 0xFFC0C0C0, Some(0xFF000000));
+        for (row, line) in self.buffer.iter().enumerate() {
+            let y = 1 + row as i32 * line_height;
+            for (col, &byte) in line.iter().enumerate() {
+                if byte != b' ' {
+                    let x = (col * FONT_WIDTH) as i32;
+                    surface.draw_char(x, y, byte as char, 0xFFC0C0C0, Some(0xFF000000));
                 }
             }
         }
 
-        // 4. Render console cursor (underscore at c:\> prompt)
         if self.cursor_row < CONSOLE_ROWS && self.cursor_col < CONSOLE_COLS {
-            let cur_x = start_x + (self.cursor_col * FONT_WIDTH) as i32;
-            let cur_y = start_y + (self.cursor_row as i32 * line_height) + 10;
-            surface.fill_rect(Rect::new(cur_x, cur_y, FONT_WIDTH as u32, 2), 0xFFC0C0C0);
+            let x = (self.cursor_col * FONT_WIDTH) as i32;
+            let y = 11 + self.cursor_row as i32 * line_height;
+            surface.fill_rect(Rect::new(x, y, FONT_WIDTH as u32, 2), 0xFFC0C0C0);
         }
+        self.text_dirty = false;
+    }
+
+    pub fn draw(&mut self, surface: &mut Surface) {
+        if self.window.is_minimized {
+            return;
+        }
+        if self.text_dirty {
+            self.rasterize_text();
+        }
+
+        let rx = self.window.rect.x;
+        let ry = self.window.rect.y;
+        self.window.draw_frame(surface);
+        // The console's pool allocation is separate from the framebuffer.
+        unsafe { surface.blit_opaque(&self.text_surface, rx + TEXT_X, ry + TEXT_Y) };
 
         // 5. Vertical Scrollbar (x = rx + 538..rx + 555, y = ry + 32..ry + 320)
         let vx = rx + 538;

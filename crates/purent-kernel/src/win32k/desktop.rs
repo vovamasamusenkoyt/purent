@@ -1,7 +1,10 @@
 //! PureNT Clean-Room Desktop
 //! Renders the authentic Windows 7 Harmony desktop wallpaper across the entire screen
 
-use super::surface::Surface;
+use super::surface::{Rect, Surface};
+
+const CURSOR_WIDTH: usize = 11;
+const CURSOR_HEIGHT: usize = 17;
 
 static WALLPAPER_RGB565: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/wallpaper_640x400_rgb565.bin"));
 
@@ -10,6 +13,7 @@ pub struct Desktop {
     pub height: u32,
     pub mouse_x: i32,
     pub mouse_y: i32,
+    cursor_underlay: [u32; CURSOR_WIDTH * CURSOR_HEIGHT],
 }
 
 impl Desktop {
@@ -17,37 +21,68 @@ impl Desktop {
         Self {
             width,
             height,
-            mouse_x: 640,
-            mouse_y: 360,
+            mouse_x: (width / 2) as i32,
+            mouse_y: (height / 2) as i32,
+            cursor_underlay: [0; CURSOR_WIDTH * CURSOR_HEIGHT],
         }
     }
 
     /// Renders the official Windows 7 Harmony wallpaper covering the entire display
     pub fn draw_background(&self, surface: &mut Surface) {
-        let wall_u16 = unsafe {
-            core::slice::from_raw_parts(
-                WALLPAPER_RGB565.as_ptr() as *const u16,
-                WALLPAPER_RGB565.len() / 2,
-            )
+        self.draw_background_region(surface, Rect::new(0, 0, self.width, self.height));
+    }
+
+    pub fn draw_background_region(&self, surface: &mut Surface, region: Rect) {
+        let bounds = Rect::new(0, 0, self.width, self.height);
+        let Some(region) = region.intersect(&bounds) else {
+            return;
         };
 
-        for y in 0..self.height {
-            let src_y = ((y as usize * 400) / self.height as usize).min(399);
+        for y in region.y..region.bottom() {
+            let src_y = (y as usize * 400) / self.height as usize;
             let row_offset = src_y * 640;
-            for x in 0..self.width {
-                let src_x = ((x as usize * 640) / self.width as usize).min(639);
-                let pixel565 = wall_u16[row_offset + src_x];
+            for x in region.x..region.right() {
+                let src_x = (x as usize * 640) / self.width as usize;
+                let offset = (row_offset + src_x) * 2;
+                let pixel565 = u16::from_le_bytes([WALLPAPER_RGB565[offset], WALLPAPER_RGB565[offset + 1]]);
                 let r = (((pixel565 >> 11) & 0x1F) as u32 * 255) / 31;
                 let g = (((pixel565 >> 5) & 0x3F) as u32 * 255) / 63;
                 let b = ((pixel565 & 0x1F) as u32 * 255) / 31;
                 let argb = 0xFF000000 | (r << 16) | (g << 8) | b;
-                surface.put_pixel(x as i32, y as i32, argb);
+                surface.put_pixel(x, y, argb);
             }
         }
     }
 
-    /// Renders mouse cursor at current coordinates
-    pub fn draw_cursor(&self, surface: &mut Surface) {
+    pub fn restore_exposed_background(&self, surface: &mut Surface, old: Rect, new: Option<Rect>) {
+        let Some(overlap) = new.and_then(|rect| old.intersect(&rect)) else {
+            self.draw_background_region(surface, old);
+            return;
+        };
+        for strip in [
+            Rect::new(old.x, old.y, old.width, (overlap.y - old.y) as u32),
+            Rect::new(old.x, overlap.bottom(), old.width, (old.bottom() - overlap.bottom()) as u32),
+            Rect::new(old.x, overlap.y, (overlap.x - old.x) as u32, overlap.height),
+            Rect::new(overlap.right(), overlap.y, (old.right() - overlap.right()) as u32, overlap.height),
+        ] {
+            self.draw_background_region(surface, strip);
+        }
+    }
+
+    pub fn erase_cursor(&self, surface: &mut Surface) {
+        for (index, &pixel) in self.cursor_underlay.iter().enumerate() {
+            let x = self.mouse_x + (index % CURSOR_WIDTH) as i32;
+            let y = self.mouse_y + (index / CURSOR_WIDTH) as i32;
+            surface.put_pixel(x, y, pixel);
+        }
+    }
+
+    pub fn draw_cursor(&mut self, surface: &mut Surface) {
+        for (index, pixel) in self.cursor_underlay.iter_mut().enumerate() {
+            let x = self.mouse_x + (index % CURSOR_WIDTH) as i32;
+            let y = self.mouse_y + (index / CURSOR_WIDTH) as i32;
+            *pixel = surface.get_pixel(x, y);
+        }
         surface.draw_cursor(self.mouse_x, self.mouse_y);
     }
 }

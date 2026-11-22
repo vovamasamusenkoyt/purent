@@ -47,14 +47,17 @@ pub fn win32k_init(fb: &FramebufferInfo) {
         )
     };
 
-    let desktop = Desktop::new(fb.width, fb.height);
+    let mut desktop = Desktop::new(fb.width, fb.height);
 
     // Center the authentic 565x347 console window on the display
     let console_w = 565;
     let console_h = 347;
     let win_x = ((fb.width as i32) - console_w) / 2;
     let win_y = ((fb.height as i32) - console_h) / 2;
-    let mut console = ConsoleWindow::new(win_x.max(10), win_y.max(10));
+    let Some(mut console) = ConsoleWindow::new(win_x.max(10), win_y.max(10)) else {
+        kprintln!("[WIN32K] Could not allocate the console surface.");
+        return;
+    };
 
     // Authentic Windows 7 Command Prompt text stream matching reference screenshot
     console.write_str("Microsoft Windows [Version 6.1.7601]\r\n");
@@ -92,6 +95,7 @@ pub fn win32k_init(fb: &FramebufferInfo) {
 pub fn win32k_console_write(text: &str) {
     let mut guard = WIN32K.lock();
     if let Some(ref mut win32k) = *guard {
+        win32k.desktop.erase_cursor(&mut win32k.hw_surface);
         win32k.console.write_str(text);
         win32k.console.draw(&mut win32k.hw_surface);
         win32k.desktop.draw_cursor(&mut win32k.hw_surface);
@@ -111,6 +115,7 @@ pub fn win32k_render_frame() {
 /// Dispatches PS/2 mouse motion, button clicks, and window dragging in real-time
 pub fn win32k_run_event_loop() -> ! {
     let mut dragging = false;
+    let mut left_was_down = false;
     let mut drag_offset_x = 0;
     let mut drag_offset_y = 0;
 
@@ -127,13 +132,11 @@ pub fn win32k_run_event_loop() -> ! {
                 // PS/2 mouse dY is positive upwards, so subtract dY for downward screen coordinates
                 let new_y = (prev_y - event.dy).clamp(0, subsystem.desktop.height as i32 - 1);
 
-                subsystem.desktop.mouse_x = new_x;
-                subsystem.desktop.mouse_y = new_y;
-
                 let win_rect = subsystem.console.window.rect;
+                let was_minimized = subsystem.console.window.is_minimized;
 
                 if event.left_button {
-                    if !dragging {
+                    if !dragging && !left_was_down {
                         // Title bar hit test: y in rect.y..rect.y + 32
                         if new_x >= win_rect.x
                             && new_x < win_rect.right()
@@ -153,7 +156,7 @@ pub fn win32k_run_event_loop() -> ! {
                                 drag_offset_y = new_y - win_rect.y;
                             }
                         }
-                    } else {
+                    } else if dragging {
                         // Dragging in progress: update window rect
                         let new_win_x = new_x - drag_offset_x;
                         let new_win_y = new_y - drag_offset_y;
@@ -164,11 +167,26 @@ pub fn win32k_run_event_loop() -> ! {
                     dragging = false;
                 }
 
-                // If mouse position changed or window was dragged, redraw scene
-                if new_x != prev_x || new_y != prev_y || dragging {
-                    subsystem.desktop.draw_background(&mut subsystem.hw_surface);
-                    subsystem.console.draw(&mut subsystem.hw_surface);
-                    subsystem.desktop.draw_cursor(&mut subsystem.hw_surface);
+                left_was_down = event.left_button;
+
+                let new_rect = subsystem.console.window.rect;
+                let is_minimized = subsystem.console.window.is_minimized;
+                let window_changed = was_minimized != is_minimized
+                    || (!is_minimized && new_rect != win_rect);
+                if new_x != prev_x || new_y != prev_y || window_changed {
+                    let desktop = &mut subsystem.desktop;
+                    let surface = &mut subsystem.hw_surface;
+                    desktop.erase_cursor(surface);
+                    if window_changed {
+                        if !was_minimized {
+                            let visible_rect = (!is_minimized).then_some(new_rect);
+                            desktop.restore_exposed_background(surface, win_rect, visible_rect);
+                        }
+                        subsystem.console.draw(surface);
+                    }
+                    desktop.mouse_x = new_x;
+                    desktop.mouse_y = new_y;
+                    desktop.draw_cursor(surface);
                 }
             }
         } else {
