@@ -172,34 +172,8 @@ pub fn serial_print(s: &str) {
     }
 }
 
-pub fn puts(con_out: *mut SimpleTextOutputProtocol, text: &str) {
+pub fn puts(_con_out: *mut SimpleTextOutputProtocol, text: &str) {
     serial_print(text);
-    let mut buf = [0u16; 128];
-    let mut i = 0;
-    for ch in text.chars() {
-        if ch == '\n' {
-            if i < buf.len() - 2 {
-                buf[i] = '\r' as u16;
-                i += 1;
-            }
-        }
-        if i < buf.len() - 1 {
-            buf[i] = ch as u16;
-            i += 1;
-        } else {
-            buf[i] = 0;
-            unsafe {
-                ((*con_out).output_string)(con_out, buf.as_ptr());
-            }
-            i = 0;
-        }
-    }
-    if i > 0 {
-        buf[i] = 0;
-        unsafe {
-            ((*con_out).output_string)(con_out, buf.as_ptr());
-        }
-    }
 }
 
 #[panic_handler]

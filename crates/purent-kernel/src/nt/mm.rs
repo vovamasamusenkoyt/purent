@@ -4,6 +4,8 @@ use purent_hal::kprintln;
 use purent_ntdef::loader::PureNtLoaderBlock;
 
 pub const PAGE_SIZE: usize = 4096;
+pub const EFI_BOOT_SERVICES_CODE: u32 = 3;
+pub const EFI_BOOT_SERVICES_DATA: u32 = 4;
 pub const EFI_CONVENTIONAL_MEMORY: u32 = 7;
 pub const POOL_TAG_NONE: u32 = 0x656E6F4E; // "None"
 
@@ -47,12 +49,14 @@ impl PhysicalMemoryManager {
 
         let mut max_phys_addr = 0u64;
 
-        // Scan memory map
+        // Scan memory map for physical RAM boundaries (ignoring MMIO apertures >= 11)
         for i in 0..entries {
             let desc = &*(map_addr.wrapping_add(i * desc_size) as *const EfiMemoryDescriptor);
-            let end_addr = desc.physical_start + desc.number_of_pages * (PAGE_SIZE as u64);
-            if end_addr > max_phys_addr {
-                max_phys_addr = end_addr;
+            if desc.r#type <= 10 {
+                let end_addr = desc.physical_start + desc.number_of_pages * (PAGE_SIZE as u64);
+                if end_addr > max_phys_addr {
+                    max_phys_addr = end_addr;
+                }
             }
         }
 
@@ -68,11 +72,15 @@ impl PhysicalMemoryManager {
             *self.bitmap_ptr.add(i) = !0;
         }
 
-        // Mark conventional free memory regions as available (0 = free)
+        // Mark available memory regions as free (Conventional RAM + Reclaimed BootServices)
         let mut free_count = 0usize;
         for i in 0..entries {
             let desc = &*(map_addr.wrapping_add(i * desc_size) as *const EfiMemoryDescriptor);
-            if desc.r#type == EFI_CONVENTIONAL_MEMORY {
+            let is_available = desc.r#type == EFI_CONVENTIONAL_MEMORY
+                || desc.r#type == EFI_BOOT_SERVICES_CODE
+                || desc.r#type == EFI_BOOT_SERVICES_DATA;
+
+            if is_available {
                 let start_frame = (desc.physical_start as usize) / PAGE_SIZE;
                 let frame_count = desc.number_of_pages as usize;
 

@@ -26,6 +26,7 @@ pub unsafe extern "win64" fn IoAllocateIrp(stack_size: i8, _charge_quota: u8) ->
     (*ptr).size = total_size as u16;
     (*ptr).stack_count = stack_size;
     (*ptr).current_location = stack_size + 1;
+    (*ptr).current_stack_location = io_get_stack_location_ptr(ptr, stack_size as usize);
 
     ptr
 }
@@ -74,6 +75,7 @@ pub unsafe extern "win64" fn IoCallDriver(
     }
 
     let stack = io_get_current_irp_stack_location(irp);
+    (*irp).current_stack_location = stack;
     (*stack).device_object = device_object;
 
     let driver_object = (*device_object).driver_object;

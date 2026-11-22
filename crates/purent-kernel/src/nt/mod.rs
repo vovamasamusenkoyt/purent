@@ -104,7 +104,7 @@ pub unsafe extern "win64" fn IoCreateDevice(
             ob_insert_device(dev_ptr as *mut u8, full_name);
         }
     } else {
-        kprintln!("[IO] IoCreateDevice: anonymous device created at 0x{:p}", dev_ptr);
+        kprintln!("[IO] IoCreateDevice: anonymous device created at 0x{:016X}", dev_ptr as usize);
     }
 
     STATUS_SUCCESS
@@ -113,7 +113,7 @@ pub unsafe extern "win64" fn IoCreateDevice(
 #[no_mangle]
 pub unsafe extern "win64" fn IoDeleteDevice(device_object: *mut DeviceObject) {
     if !device_object.is_null() {
-        kprintln!("[IO] IoDeleteDevice at 0x{:p}", device_object);
+        kprintln!("[IO] IoDeleteDevice at 0x{:016X}", device_object as usize);
         ExFreePoolWithTag(device_object as *mut core::ffi::c_void, DEVICE_TAG);
     }
 }
@@ -127,8 +127,8 @@ pub unsafe extern "win64" fn IoDeleteSymbolicLink(_symbolic_link_name: *mut Unic
 #[no_mangle]
 pub unsafe extern "win64" fn IofCompleteRequest(irp: *mut Irp, priority_boost: i8) {
     if !irp.is_null() {
-        kprintln!("[IO] IofCompleteRequest: IRP 0x{:p} completed (Status: 0x{:08X}, Info: {}, Boost: {})",
-            irp,
+        kprintln!("[IO] IofCompleteRequest: IRP 0x{:016X} completed (Status: 0x{:08X}, Info: {}, Boost: {})",
+            irp as usize,
             (*irp).io_status.status,
             (*irp).io_status.information,
             priority_boost
@@ -143,12 +143,12 @@ pub unsafe extern "win64" fn MmPageEntireDriver(address: *mut core::ffi::c_void)
 
 #[no_mangle]
 pub unsafe extern "win64" fn IoRegisterFileSystem(device_object: *mut DeviceObject) {
-    kprintln!("[IO] IoRegisterFileSystem: registering filesystem device 0x{:p}", device_object);
+    kprintln!("[IO] IoRegisterFileSystem: registering filesystem device 0x{:016X}", device_object as usize);
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn IoUnregisterFileSystem(device_object: *mut DeviceObject) {
-    kprintln!("[IO] IoUnregisterFileSystem: unregistering filesystem device 0x{:p}", device_object);
+    kprintln!("[IO] IoUnregisterFileSystem: unregistering filesystem device 0x{:016X}", device_object as usize);
 }
 
 #[no_mangle]

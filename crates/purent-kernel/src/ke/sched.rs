@@ -183,7 +183,7 @@ pub unsafe fn sched_init() {
         q.current_index = 0;
     }
 
-    kprintln!("[KE] Preemptive Scheduler online (Initial Process PID: 4, Boot Thread: 0x{:p})", &raw const BOOT_THREAD);
+    kprintln!("[KE] Preemptive Scheduler online (Initial Process PID: 4, Boot Thread: 0x{:016X})", &raw const BOOT_THREAD as usize);
 }
 
 pub unsafe fn ps_create_system_thread(
@@ -239,9 +239,9 @@ pub unsafe fn ps_create_system_thread(
     }
 
     kprintln!(
-        "[PS] Created System Thread \"{}\" (KTHREAD: 0x{:p}, KernelStack: 0x{:016X})",
+        "[PS] Created System Thread \"{}\" (KTHREAD: 0x{:016X}, KernelStack: 0x{:016X})",
         name,
-        thread_ptr,
+        thread_ptr as usize,
         frame_base
     );
 

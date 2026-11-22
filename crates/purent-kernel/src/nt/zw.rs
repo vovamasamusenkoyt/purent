@@ -160,14 +160,14 @@ pub unsafe extern "win64" fn ZwWriteFile(
     (*stack).parameters[0] = length as usize; // Length
 
     kprintln!(
-        "[ZW] ZwWriteFile: HANDLE 0x{:X} -> Device 0x{:p} ({} bytes payload)",
+        "[ZW] ZwWriteFile: HANDLE 0x{:X} -> Device 0x{:016X} ({} bytes payload)",
         file_handle,
-        dev_obj,
+        dev_obj as usize,
         length
     );
     let status = IoCallDriver(dev_obj, irp);
     (*io_status_block).status = status;
-    (*io_status_block).information = length as usize;
+    (*io_status_block).information = (*irp).io_status.information;
     status
 }
 

@@ -85,6 +85,16 @@ macro_rules! kprintln {
 
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
+    let rflags: u64;
+    unsafe {
+        core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(nomem, preserves_flags));
+        core::arch::asm!("cli", options(nomem, nostack));
+    }
     let mut port = SerialPort::new(COM1_BASE);
     let _ = port.write_fmt(args);
+    if (rflags & 0x200) != 0 {
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack));
+        }
+    }
 }

@@ -88,21 +88,31 @@ pub struct IoStackLocation {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Irp {
-    pub r#type: i16,
-    pub size: u16,
-    pub mdl_address: *mut core::ffi::c_void,
-    pub flags: u32,
-    pub associated_irp_system_buffer: *mut core::ffi::c_void,
-    pub thread_list_entry: ListEntry,
-    pub io_status: IoStatusBlock,
-    pub requestor_mode: i8,
-    pub pending_returned: u8,
-    pub stack_count: i8,
-    pub current_location: i8,
-    pub cancel: u8,
-    pub cancel_irql: u8,
-    pub user_buffer: *mut core::ffi::c_void,
-    pub tail: [u8; 128],
+    pub r#type: i16,                              // 0x00
+    pub size: u16,                                // 0x02
+    pub padding_1: u32,                           // 0x04
+    pub mdl_address: *mut core::ffi::c_void,      // 0x08
+    pub flags: u32,                               // 0x10
+    pub padding_2: u32,                           // 0x14
+    pub associated_irp_system_buffer: *mut core::ffi::c_void, // 0x18
+    pub thread_list_entry: ListEntry,             // 0x20..0x30
+    pub io_status: IoStatusBlock,                 // 0x30..0x40
+    pub requestor_mode: i8,                       // 0x40
+    pub pending_returned: u8,                     // 0x41
+    pub stack_count: i8,                          // 0x42
+    pub current_location: i8,                     // 0x43
+    pub cancel: u8,                               // 0x44
+    pub cancel_irql: u8,                          // 0x45
+    pub apc_environment: u8,                      // 0x46
+    pub allocation_flags: u8,                     // 0x47
+    pub user_iosb: *mut core::ffi::c_void,        // 0x48
+    pub user_event: *mut core::ffi::c_void,       // 0x50
+    pub overlay: [u8; 16],                        // 0x58..0x68
+    pub cancel_routine: *mut core::ffi::c_void,   // 0x68
+    pub user_buffer: *mut core::ffi::c_void,      // 0x70
+    pub tail_padding: [u8; 0x40],                 // 0x78..0xB8
+    pub current_stack_location: *mut IoStackLocation, // 0xB8 (Tail.Overlay.CurrentStackLocation)
+    pub tail_rest: [u8; 0x10],                    // 0xC0..0xD0
 }
 
 #[repr(C)]
