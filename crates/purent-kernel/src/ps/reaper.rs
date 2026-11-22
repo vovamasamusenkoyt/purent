@@ -35,8 +35,14 @@ pub unsafe fn ps_reap_thread(thread: *mut KThread) {
     let teb = (*thread).teb;
     if !teb.is_null() {
         let proc = (*thread).process as *mut Process;
-        kprintln!("[REAPER] Process \"smss.exe\" (PID: 0x200) rundown: deallocated PEB (0x00450000), TEB (0x00460000), UserStack (0x00470000..0x00480000), and Sections (0x00400000..0x00405000)");
-        kprintln!("[REAPER] Process \"smss.exe\" handle table rundown: closed all user handles");
+        let proc_name = if !proc.is_null() {
+            core::str::from_utf8(&(*proc).image_file_name).unwrap_or("process").trim_end_matches('\0')
+        } else {
+            "process"
+        };
+        let pid = if !proc.is_null() { (*proc).unique_process_id } else { 0 };
+        kprintln!("[REAPER] Process \"{}\" (PID: 0x{:X}) rundown: deallocated PEB, TEB, UserStack, and Sections", proc_name, pid);
+        kprintln!("[REAPER] Process \"{}\" handle table rundown: closed all user handles", proc_name);
         if !proc.is_null() {
             ExFreePoolWithTag(proc as *mut core::ffi::c_void, PROCESS_TAG);
             kprintln!("[REAPER] Process object (EPROCESS 0x{:016X}) pool memory freed", proc as usize);

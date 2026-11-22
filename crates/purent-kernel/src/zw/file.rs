@@ -128,6 +128,21 @@ pub unsafe extern "win64" fn ZwWriteFile(
         return STATUS_INVALID_PARAMETER;
     }
 
+    // Special handling for Console / Stdout (Handle 1, 4)
+    if file_handle == 1 || file_handle == 4 {
+        let slice = core::slice::from_raw_parts(buffer as *const u8, length as usize);
+        if let Ok(s) = core::str::from_utf8(slice) {
+            purent_hal::kprint!("{}", s);
+        } else {
+            for &b in slice {
+                purent_hal::kprint!("{}", b as char);
+            }
+        }
+        (*io_status_block).status = STATUS_SUCCESS;
+        (*io_status_block).information = length as usize;
+        return STATUS_SUCCESS;
+    }
+
     let header = match ob_reference_object_by_handle(file_handle) {
         Ok(h) => h,
         Err(status) => return status,

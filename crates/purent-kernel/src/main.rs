@@ -201,6 +201,14 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     ke::ke_wait_for_single_object(smss_thread);
     ps::ps_reap_thread(smss_thread);
 
+    // 11. Launch original Microsoft Windows 7 SP1 x64 cmd.exe
+    kprintln!("\n--- [STAGE: ORIGINAL MICROSOFT WINDOWS 7 CMD.EXE EXECUTION] ---");
+    let (_cmd_proc, cmd_thread) = ps::ps_create_cmd_process(CMD_EXE_BYTES, WIN32_DLL_BYTES, "cmd.exe", 0x300).expect("cmd.exe");
+    kprintln!("[KE] Original Microsoft cmd.exe active. Synchronizing via KeWaitForSingleObject...");
+    ke::ke_wait_for_single_object(cmd_thread);
+    ps::ps_reap_thread(cmd_thread);
+    kprintln!("--- [STAGE COMPLETE: ORIGINAL CMD.EXE EXECUTED & REAPED CLEANLY] ---");
+
     // Verify NonPagedPool buffer reclamation: create probe thread on reclaimed memory
     kprintln!("\n[POOL-TEST] Verifying NonPagedPool stack buffer reclamation and reuse...");
     let thread_probe = ke::ps_create_system_thread(worker_probe, 99 as *mut _, "ReclamationProbe").expect("probe");
@@ -215,6 +223,8 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
 }
 
 static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows-msvc/debug/smss.exe");
+static CMD_EXE_BYTES: &[u8] = include_bytes!("../../../refs/win7_7601_x64/binaries/cmd.exe");
+static WIN32_DLL_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows-msvc/debug/purent_win32.dll");
 
 unsafe extern "win64" fn worker_probe(_context: *mut core::ffi::c_void) {
     kprintln!("[PROBE-THREAD] Executing on re-allocated stack from NonPagedPool! Terminating cleanly...");

@@ -4,6 +4,30 @@
 use purent_ntdef::kpcr::KThread;
 
 #[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn __chkstk() {
+    core::arch::naked_asm!(
+        "push rcx",
+        "push rax",
+        "cmp rax, 0x1000",
+        "lea rcx, [rsp + 24]",
+        "jb 2f",
+        "1:",
+        "sub rcx, 0x1000",
+        "test byte ptr [rcx], 0",
+        "sub rax, 0x1000",
+        "cmp rax, 0x1000",
+        "ja 1b",
+        "2:",
+        "sub rcx, rax",
+        "test byte ptr [rcx], 0",
+        "pop rax",
+        "pop rcx",
+        "ret",
+    );
+}
+
+#[unsafe(naked)]
 pub unsafe extern "win64" fn ki_thread_start_trampoline() {
     core::arch::naked_asm!(
         "sub rsp, 0x20", // 32 bytes Win64 shadow store (keeps RSP % 16 == 0)

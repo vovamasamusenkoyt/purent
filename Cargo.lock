@@ -38,6 +38,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "purent-win32"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]
+
+[[package]]
 name = "smss"
 version = "0.1.0"
 dependencies = [

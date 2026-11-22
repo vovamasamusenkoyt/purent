@@ -105,6 +105,16 @@ pub struct ImageNtHeaders64 {
 }
 
 #[repr(C, packed)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ImageImportDescriptor {
+    pub original_first_thunk: u32,
+    pub time_date_stamp: u32,
+    pub forwarder_chain: u32,
+    pub name: u32,
+    pub first_thunk: u32,
+}
+
+#[repr(C, packed)]
 #[derive(Copy, Clone, Debug)]
 pub struct ImageSectionHeader {
     pub name: [u8; 8],
@@ -198,5 +208,28 @@ impl<'a> PeView<'a> {
             let ptr = self.data.as_ptr().add(sections_offset) as *const ImageSectionHeader;
             core::slice::from_raw_parts(ptr, num_sections)
         }
+    }
+
+    pub fn data_directory(&self, idx: usize) -> Option<&ImageDataDirectory> {
+        let nt = self.nt_headers();
+        if idx < nt.optional_header.number_of_rva_and_sizes as usize {
+            Some(&nt.optional_header.data_directory[idx])
+        } else {
+            None
+        }
+    }
+
+    pub fn rva_to_offset(&self, rva: u32) -> Option<usize> {
+        for sec in self.section_headers() {
+            let va = sec.virtual_address;
+            let vsize = sec.virtual_size;
+            let rsize = sec.size_of_raw_data;
+            let span = if vsize > rsize { vsize } else { rsize };
+            if rva >= va && rva < va + span {
+                let delta = (rva - va) as usize;
+                return Some(sec.pointer_to_raw_data as usize + delta);
+            }
+        }
+        None
     }
 }

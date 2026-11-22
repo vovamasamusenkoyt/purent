@@ -96,6 +96,13 @@ pub unsafe extern "C" fn generic_exception_handler(vector: u64, error_code: u64,
     kprintln!("RIP: 0x{:016X}, CS: 0x{:04X}, RFLAGS: 0x{:016X}", f.rip, f.cs, f.rflags);
     kprintln!("RSP: 0x{:016X}, SS: 0x{:04X}", f.rsp, f.ss);
 
+    kprintln!("Stack dump at RSP 0x{:016X}:", f.rsp);
+    let sp = f.rsp as *const u64;
+    for i in 0..16 {
+        let val = core::ptr::read_unaligned(sp.add(i));
+        kprintln!("  [RSP+0x{:02X}]: 0x{:016X}", i * 8, val);
+    }
+
     if vector == 0x0E {
         kprintln!("CR2 (Faulting Address): 0x{:016X}", read_cr2());
     }
