@@ -3,10 +3,12 @@
 pub mod io;
 pub mod mm;
 pub mod ob;
+pub mod zw;
 
 pub use io::*;
 pub use mm::*;
 pub use ob::*;
+pub use zw::*;
 
 use purent_hal::kprintln;
 use purent_ntdef::{
@@ -92,12 +94,15 @@ pub unsafe extern "win64" fn IoCreateDevice(
             }
         }
         let full_name = core::str::from_utf8_unchecked(&name_buf[..idx]);
-        let short_name = if full_name.starts_with("\\Device\\") {
-            &full_name["\\Device\\".len()..]
+        if full_name.starts_with("\\Device\\") {
+            let short_name = &full_name["\\Device\\".len()..];
+            ob_insert_device(dev_ptr as *mut u8, short_name);
+        } else if full_name.starts_with("\\FileSystem\\") {
+            let short_name = &full_name["\\FileSystem\\".len()..];
+            ob_insert_filesystem(dev_ptr as *mut u8, short_name);
         } else {
-            full_name
-        };
-        ob_insert_device(dev_ptr as *mut u8, short_name);
+            ob_insert_device(dev_ptr as *mut u8, full_name);
+        }
     } else {
         kprintln!("[IO] IoCreateDevice: anonymous device created at 0x{:p}", dev_ptr);
     }
@@ -135,6 +140,62 @@ pub unsafe extern "win64" fn IofCompleteRequest(irp: *mut Irp, priority_boost: i
 pub unsafe extern "win64" fn MmPageEntireDriver(address: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
     address
 }
+
+#[no_mangle]
+pub unsafe extern "win64" fn IoRegisterFileSystem(device_object: *mut DeviceObject) {
+    kprintln!("[IO] IoRegisterFileSystem: registering filesystem device 0x{:p}", device_object);
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn IoUnregisterFileSystem(device_object: *mut DeviceObject) {
+    kprintln!("[IO] IoUnregisterFileSystem: unregistering filesystem device 0x{:p}", device_object);
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn KeInitializeEvent(
+    event: *mut core::ffi::c_void,
+    _event_type: u32,
+    initial_state: u8,
+) {
+    if !event.is_null() {
+        core::ptr::write_bytes(event as *mut u8, 0, 24);
+        let state_ptr = event as *mut u32;
+        *state_ptr = initial_state as u32;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn KeSetEvent(
+    event: *mut core::ffi::c_void,
+    _increment: i32,
+    _wait: u8,
+) -> i32 {
+    if !event.is_null() {
+        let state_ptr = event as *mut u32;
+        let prev = *state_ptr;
+        *state_ptr = 1;
+        prev as i32
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn KeWaitForSingleObject(
+    _object: *mut core::ffi::c_void,
+    _wait_reason: u32,
+    _wait_mode: i8,
+    _alertable: u8,
+    _timeout: *mut i64,
+) -> NtStatus {
+    STATUS_SUCCESS
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn KeEnterCriticalRegion() {}
+
+#[no_mangle]
+pub unsafe extern "win64" fn KeLeaveCriticalRegion() {}
 
 #[no_mangle]
 pub unsafe extern "win64" fn KeBugCheckEx(

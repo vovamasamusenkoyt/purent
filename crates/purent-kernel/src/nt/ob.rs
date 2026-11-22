@@ -4,7 +4,6 @@ use purent_hal::kprintln;
 use purent_ntdef::{
     object::AccessMask,
     status::{NtStatus, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS},
-    string::UnicodeString,
 };
 use crate::nt::mm::{ExAllocatePoolWithTag, NonPagedPool};
 
@@ -38,6 +37,12 @@ pub static mut OB_TYPE_DRIVER: ObjectType = ObjectType {
 
 pub static mut OB_TYPE_SYMLINK: ObjectType = ObjectType {
     name: "SymbolicLink",
+    total_number_of_objects: 0,
+    total_number_of_handles: 0,
+};
+
+pub static mut OB_TYPE_FILE: ObjectType = ObjectType {
+    name: "File",
     total_number_of_objects: 0,
     total_number_of_handles: 0,
 };
@@ -105,6 +110,7 @@ static mut ROOT_DIR: ObjectDirectory = ObjectDirectory::new();
 static mut DEVICE_DIR: ObjectDirectory = ObjectDirectory::new();
 static mut DRIVER_DIR: ObjectDirectory = ObjectDirectory::new();
 static mut DOS_DEVICES_DIR: ObjectDirectory = ObjectDirectory::new();
+static mut FILE_SYSTEM_DIR: ObjectDirectory = ObjectDirectory::new();
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -128,8 +134,9 @@ pub unsafe fn ob_init() {
     insert_directory_entry(&raw mut ROOT_DIR, &raw mut DEVICE_DIR, "Device");
     insert_directory_entry(&raw mut ROOT_DIR, &raw mut DRIVER_DIR, "Driver");
     insert_directory_entry(&raw mut ROOT_DIR, &raw mut DOS_DEVICES_DIR, "DosDevices");
+    insert_directory_entry(&raw mut ROOT_DIR, &raw mut FILE_SYSTEM_DIR, "FileSystem");
 
-    kprintln!("[OB] Object Manager namespace initialized (Root: \\, \\Device, \\Driver, \\DosDevices)");
+    kprintln!("[OB] Object Manager namespace initialized (Root: \\, \\Device, \\Driver, \\DosDevices, \\FileSystem)");
 }
 
 unsafe fn create_header(body: *mut u8, name: &str, obj_type: *mut ObjectType) -> *mut ObjectHeader {
@@ -167,6 +174,42 @@ pub unsafe fn ob_insert_device(device_ptr: *mut u8, name: &str) -> NtStatus {
     status
 }
 
+pub unsafe fn ob_insert_filesystem(device_ptr: *mut u8, name: &str) -> NtStatus {
+    let header = create_header(device_ptr, name, &raw mut OB_TYPE_DEVICE);
+    (*header).parent_directory = &raw mut FILE_SYSTEM_DIR;
+    let status = FILE_SYSTEM_DIR.insert(header);
+    if status == STATUS_SUCCESS {
+        kprintln!("[OB] Registered object in namespace: \\FileSystem\\{}", name);
+    }
+    status
+}
+
+pub unsafe fn ob_insert_file(file_ptr: *mut u8, name: &str) -> *mut ObjectHeader {
+    let header = create_header(file_ptr, name, &raw mut OB_TYPE_FILE);
+    header
+}
+
+pub unsafe fn ob_close_handle(handle: usize) -> NtStatus {
+    let handle_idx = handle / 4;
+    if handle_idx == 0 || handle_idx >= SYSTEM_HANDLE_TABLE.len() {
+        return purent_ntdef::status::STATUS_INVALID_HANDLE;
+    }
+    let entry = &mut SYSTEM_HANDLE_TABLE[handle_idx];
+    if entry.object.is_null() {
+        return purent_ntdef::status::STATUS_INVALID_HANDLE;
+    }
+    let header = entry.object;
+    if (*header).handle_count > 0 {
+        (*header).handle_count -= 1;
+    }
+    if (*header).pointer_count > 0 {
+        (*header).pointer_count -= 1;
+    }
+    entry.object = core::ptr::null_mut();
+    entry.granted_access = 0;
+    STATUS_SUCCESS
+}
+
 pub unsafe fn ob_create_handle(object_header: *mut ObjectHeader, access: AccessMask) -> usize {
     let handle_idx = NEXT_HANDLE / 4;
     NEXT_HANDLE += 4;
@@ -181,16 +224,20 @@ pub unsafe fn ob_create_handle(object_header: *mut ObjectHeader, access: AccessM
 }
 
 pub unsafe fn ob_reference_object_by_name(path: &str) -> Result<*mut ObjectHeader, NtStatus> {
-    if !path.starts_with("\\Device\\") {
-        return Err(STATUS_OBJECT_NAME_NOT_FOUND);
+    if path.starts_with("\\Device\\") {
+        let dev_name = &path["\\Device\\".len()..];
+        if let Some(hdr) = DEVICE_DIR.lookup(dev_name) {
+            (*hdr).pointer_count += 1;
+            return Ok(hdr);
+        }
+    } else if path.starts_with("\\FileSystem\\") {
+        let fs_name = &path["\\FileSystem\\".len()..];
+        if let Some(hdr) = FILE_SYSTEM_DIR.lookup(fs_name) {
+            (*hdr).pointer_count += 1;
+            return Ok(hdr);
+        }
     }
-    let dev_name = &path["\\Device\\".len()..];
-    if let Some(hdr) = DEVICE_DIR.lookup(dev_name) {
-        (*hdr).pointer_count += 1;
-        Ok(hdr)
-    } else {
-        Err(STATUS_OBJECT_NAME_NOT_FOUND)
-    }
+    Err(STATUS_OBJECT_NAME_NOT_FOUND)
 }
 
 pub unsafe fn ob_reference_object_by_handle(handle: usize) -> Result<*mut ObjectHeader, NtStatus> {

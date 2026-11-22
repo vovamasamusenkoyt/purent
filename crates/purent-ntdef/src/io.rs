@@ -11,6 +11,7 @@ pub const IRP_MJ_WRITE: u8 = 0x04;
 pub const IRP_MJ_QUERY_INFORMATION: u8 = 0x05;
 pub const IRP_MJ_SET_INFORMATION: u8 = 0x06;
 pub const IRP_MJ_FLUSH_BUFFERS: u8 = 0x09;
+pub const IRP_MJ_FILE_SYSTEM_CONTROL: u8 = 0x0d;
 pub const IRP_MJ_DEVICE_CONTROL: u8 = 0x0e;
 pub const IRP_MJ_INTERNAL_DEVICE_CONTROL: u8 = 0x0f;
 pub const IRP_MJ_SHUTDOWN: u8 = 0x10;
@@ -102,4 +103,36 @@ pub struct Irp {
     pub cancel_irql: u8,
     pub user_buffer: *mut core::ffi::c_void,
     pub tail: [u8; 128],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct FileObject {
+    pub r#type: i16,
+    pub size: u16,
+    pub device_object: *mut DeviceObject,
+    pub vpb: *mut core::ffi::c_void,
+    pub fs_context: *mut core::ffi::c_void,
+    pub fs_context2: *mut core::ffi::c_void,
+    pub section_object_pointer: *mut core::ffi::c_void,
+    pub private_cache_map: *mut core::ffi::c_void,
+    pub final_status: crate::status::NtStatus,
+    pub related_file_object: *mut FileObject,
+    pub lock_operation: u8,
+    pub delete_pending: u8,
+    pub read_access: u8,
+    pub write_access: u8,
+    pub delete_access: u8,
+    pub shared_read: u8,
+    pub shared_write: u8,
+    pub shared_delete: u8,
+    pub flags: u32,
+    pub file_name: UnicodeString,
+    pub current_byte_offset: i64,
+    pub waiters: u32,
+    pub busy: u32,
+    pub last_lock: *mut core::ffi::c_void,
+    pub lock: [u8; 32],
+    pub event: [u8; 32],
+    pub completion_context: *mut core::ffi::c_void,
 }

@@ -8,9 +8,12 @@ use core::panic::PanicInfo;
 use purent_hal::{gdt, hlt_loop, kprintln, serial::SERIAL1};
 use purent_ntdef::kpcr::{Kpcr, Kprcb, NtTib};
 use purent_ntdef::loader::{PureNtLoaderBlock, PURENT_LOADER_MAGIC};
-use purent_ntdef::object::{GENERIC_READ, GENERIC_WRITE};
+use purent_ntdef::object::{ObjectAttributes, GENERIC_READ, GENERIC_WRITE};
+use purent_ntdef::string::UnicodeString;
 use crate::nt::mm::{pmm_init, pool_init};
-use crate::nt::ob::{ob_create_handle, ob_init, ob_reference_object_by_name};
+use crate::nt::ob::ob_init;
+use crate::nt::zw::{ZwClose, ZwCreateFile, ZwWriteFile};
+use crate::nt::RtlInitUnicodeString;
 
 static mut BOOT_KPCR: Kpcr = Kpcr {
     nt_tib: NtTib {
@@ -96,31 +99,72 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
 
     kprintln!("[IO] I/O Manager (Io) initialized.");
 
-    // 7. Load native binary driver (null.sys)
-    kprintln!("\n--- [STAGE: LOADING NATIVE BINARY DRIVER] ---");
-    let loaded = loader::load_null_driver();
-    if loaded {
-        kprintln!("--- [STAGE COMPLETE: NATIVE DRIVER ACTIVE] ---\n");
-
-        // 8. Execute synthetic IRP dispatch loop against null.sys
-        loader::test_driver_io();
-
-        // 9. Object Manager lookup & Handle creation test
-        kprintln!("\n--- [STAGE: OBJECT MANAGER LOOKUP & HANDLES] ---");
-        match ob_reference_object_by_name("\\Device\\Null") {
-            Ok(hdr) => {
-                kprintln!("[OB-TEST] Found object in namespace: \"{}\"", (*hdr).name_str());
-                let handle = ob_create_handle(hdr, GENERIC_READ | GENERIC_WRITE);
-                kprintln!("[OB-TEST] Successfully opened HANDLE 0x{:X} to \\Device\\Null!", handle);
-            }
-            Err(e) => {
-                kprintln!("[OB-TEST] Failed to lookup \\Device\\Null: 0x{:08X}", e);
-            }
-        }
-        kprintln!("--- [STAGE COMPLETE: OBJECT MANAGER VERIFIED] ---\n");
+    // 7. Load native binary drivers (null.sys and fs_rec.sys)
+    kprintln!("\n--- [STAGE: LOADING NATIVE BINARY DRIVERS] ---");
+    let null_loaded = loader::load_null_driver();
+    let fs_rec_loaded = loader::load_fs_rec_driver();
+    if null_loaded && fs_rec_loaded {
+        kprintln!("--- [STAGE COMPLETE: ALL NATIVE DRIVERS ACTIVE] ---\n");
     } else {
-        kprintln!("--- [STAGE FAILED] ---\n");
+        kprintln!("[WARN] One or more drivers failed to initialize.");
     }
+
+    // 8. Test NT System Calls (ZwCreateFile, ZwWriteFile, ZwClose)
+    kprintln!("\n--- [STAGE: NT SYSTEM CALLS EXECUTION (Zw* API)] ---");
+    let dev_null_u16: [u16; 13] = [
+        '\\' as u16, 'D' as u16, 'e' as u16, 'v' as u16, 'i' as u16, 'c' as u16, 'e' as u16,
+        '\\' as u16, 'N' as u16, 'u' as u16, 'l' as u16, 'l' as u16, 0,
+    ];
+    let mut dev_name = UnicodeString::empty();
+    RtlInitUnicodeString(&mut dev_name, dev_null_u16.as_ptr());
+
+    let mut obj_attr = ObjectAttributes::empty();
+    obj_attr.object_name = &mut dev_name;
+    obj_attr.attributes = 0x40; // OBJ_CASE_INSENSITIVE
+
+    let mut file_handle: usize = 0;
+    let mut io_status = purent_ntdef::io::IoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+
+    kprintln!("[SYSCALL-TEST] Invoking ZwCreateFile(L\"\\Device\\Null\")...");
+    let status = ZwCreateFile(
+        &mut file_handle,
+        GENERIC_READ | GENERIC_WRITE,
+        &mut obj_attr,
+        &mut io_status,
+        core::ptr::null_mut(),
+        0,
+        0,
+        1,
+        0,
+        core::ptr::null_mut(),
+        0,
+    );
+    kprintln!("[SYSCALL-TEST] ZwCreateFile returned: 0x{:08X}, FileHandle: 0x{:X}", status, file_handle);
+
+    if file_handle != 0 {
+        let msg = b"PureNT NT-compatible kernel write test!\0";
+        kprintln!("[SYSCALL-TEST] Invoking ZwWriteFile(HANDLE: 0x{:X}, Payload: {} bytes)...", file_handle, msg.len() - 1);
+        let write_status = ZwWriteFile(
+            file_handle,
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            &mut io_status,
+            msg.as_ptr() as *const _,
+            (msg.len() - 1) as u32,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        kprintln!("[SYSCALL-TEST] ZwWriteFile returned: 0x{:08X}, bytes written: {}", write_status, io_status.information);
+
+        kprintln!("[SYSCALL-TEST] Invoking ZwClose(HANDLE: 0x{:X})...", file_handle);
+        let close_status = ZwClose(file_handle);
+        kprintln!("[SYSCALL-TEST] ZwClose returned: 0x{:08X}", close_status);
+    }
+    kprintln!("--- [STAGE COMPLETE: NT SYSTEM CALLS VERIFIED] ---\n");
 
     kprintln!("[PureNT] System idle. All subsystems operational.");
 

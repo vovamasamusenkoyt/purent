@@ -97,3 +97,64 @@ pub unsafe extern "win64" fn IoCallDriver(
 
     dispatch_routine(device_object, irp)
 }
+
+#[no_mangle]
+pub unsafe extern "win64" fn IofCallDriver(device_object: *mut DeviceObject, irp: *mut Irp) -> NtStatus {
+    IoCallDriver(device_object, irp)
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn IoBuildDeviceIoControlRequest(
+    io_control_code: u32,
+    device_object: *mut DeviceObject,
+    _input_buffer: *mut core::ffi::c_void,
+    input_buffer_length: u32,
+    output_buffer: *mut core::ffi::c_void,
+    output_buffer_length: u32,
+    _internal_device_io_control: u8,
+    _event: *mut core::ffi::c_void,
+    _io_status_block: *mut purent_ntdef::io::IoStatusBlock,
+) -> *mut Irp {
+    let stack_size = if !device_object.is_null() {
+        (*device_object).stack_size.max(1)
+    } else {
+        1
+    };
+    let irp = IoAllocateIrp(stack_size, 0);
+    if !irp.is_null() {
+        (*irp).user_buffer = output_buffer;
+        let stack = io_get_next_irp_stack_location(irp);
+        (*stack).major_function = purent_ntdef::io::IRP_MJ_DEVICE_CONTROL;
+        (*stack).device_object = device_object;
+        (*stack).parameters[0] = output_buffer_length as usize;
+        (*stack).parameters[1] = input_buffer_length as usize;
+        (*stack).parameters[2] = io_control_code as usize;
+    }
+    irp
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn IoBuildSynchronousFsdRequest(
+    major_function: u32,
+    device_object: *mut DeviceObject,
+    buffer: *mut core::ffi::c_void,
+    length: u32,
+    _starting_offset: *mut i64,
+    _event: *mut core::ffi::c_void,
+    _io_status_block: *mut purent_ntdef::io::IoStatusBlock,
+) -> *mut Irp {
+    let stack_size = if !device_object.is_null() {
+        (*device_object).stack_size.max(1)
+    } else {
+        1
+    };
+    let irp = IoAllocateIrp(stack_size, 0);
+    if !irp.is_null() {
+        (*irp).user_buffer = buffer;
+        let stack = io_get_next_irp_stack_location(irp);
+        (*stack).major_function = major_function as u8;
+        (*stack).device_object = device_object;
+        (*stack).parameters[0] = length as usize;
+    }
+    irp
+}
