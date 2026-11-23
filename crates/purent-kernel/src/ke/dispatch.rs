@@ -51,7 +51,7 @@ pub extern "win64" fn ki_system_call_dispatch(frame: &mut TrapFrame) {
     if matches!(syscall_nr, purent_ntdef::syscall::SYSCALL_PURENT_MAP_DLL | purent_ntdef::syscall::SYSCALL_PURENT_SEAL_IMAGE) {
         use purent_ntdef::syscall::SYSCALL_PURENT_MAP_DLL;
         let allowed = crate::ps::current_process_id().is_some_and(|pid| {
-            pid == win32k::CONSOLE_CLIENT_PID || crate::ps::builtin::image_for_pid(pid).is_some()
+            pid == win32k::CONSOLE_CLIENT_PID || pid == win32k::WINDOWDEMO_PID || crate::ps::builtin::image_for_pid(pid).is_some()
         });
         let status = if !allowed {
             purent_ntdef::status::STATUS_ACCESS_DENIED
@@ -90,6 +90,7 @@ pub extern "win64" fn ki_system_call_dispatch(frame: &mut TrapFrame) {
     let status: NtStatus = match syscall_nr {
         SYSCALL_PURENT_COMPOSE_RECEIVE => win32k::compositor::receive(),
         SYSCALL_PURENT_COMPOSE_FINISH => win32k::compositor::finish(),
+        purent_ntdef::syscall::SYSCALL_PURENT_WINDOW => unsafe { win32k::windows::service(a1, a2 as usize, a3 as usize, a4 as usize) },
         SYSCALL_PURENT_SHOW_DIALOG => unsafe { crate::win32k::show_dialog(a1 as usize) },
         SYSCALL_NT_CREATE_FILE => unsafe {
             let file_handle = a1 as *mut usize;

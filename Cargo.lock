@@ -110,6 +110,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "windowdemo"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]
+
+[[package]]
 name = "xtask"
 version = "0.1.0"
 dependencies = [

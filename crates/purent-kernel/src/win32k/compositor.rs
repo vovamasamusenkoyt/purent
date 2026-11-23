@@ -10,7 +10,7 @@ use crate::mm::{
     NonPagedPool, PTE_NX, PTE_PRESENT, PTE_USER, PTE_WRITABLE,
 };
 
-use super::{dialog, surface::{Rect, Surface}};
+use super::{dialog, windows::{self, DesktopWindow}, surface::{Rect, Surface}};
 
 const PAGE_SIZE: usize = 4096;
 const IDLE: u8 = 0;
@@ -21,7 +21,7 @@ static STATE: AtomicU8 = AtomicU8::new(IDLE);
 pub struct Compositor {
     job: usize,
     pub console: Surface,
-    pub dialogs: [Surface; MAX_DIALOG_SURFACES],
+    pub windows: [Surface; MAX_WINDOW_SURFACES],
 }
 
 pub unsafe fn allocate_page_aligned(bytes: usize) -> Option<(*mut u8, *mut core::ffi::c_void)> {
@@ -45,19 +45,19 @@ impl Compositor {
             (width as usize * height as usize * 4).div_ceil(PAGE_SIZE) * PAGE_SIZE
         };
         let console_bytes = rounded_size(window.width, window.height);
-        let dialog_bytes = rounded_size(dialog::WIDTH, dialog::HEIGHT);
+        let window_bytes = rounded_size(windows::MAX_WIDTH, windows::MAX_HEIGHT);
         let (job, allocation) = allocate_page_aligned(
-            PAGE_SIZE + console_bytes + MAX_DIALOG_SURFACES * dialog_bytes,
+            PAGE_SIZE + console_bytes + MAX_WINDOW_SURFACES * window_bytes,
         ).ok_or(STATUS_NO_MEMORY)?;
         let console = job.add(PAGE_SIZE);
-        let dialogs = console.add(console_bytes);
+        let windows = console.add(console_bytes);
         let mut mappings = [(0, job, 0, false); MAX_LAYERS + 2];
         mappings[0] = (JOB_ADDRESS, job, PAGE_SIZE, false);
         mappings[1] = (OUTPUT_ADDRESS, frame.buffer.cast(), frame_bytes, true);
         mappings[2] = (surface_address(0), console, console_bytes, false);
-        for slot in 0..MAX_DIALOG_SURFACES {
+        for slot in 0..MAX_WINDOW_SURFACES {
             mappings[slot + 3] = (
-                surface_address(slot + 1), dialogs.add(slot * dialog_bytes), dialog_bytes, false,
+                surface_address(slot + 1), windows.add(slot * window_bytes), window_bytes, false,
             );
         }
         let cr3 = purent_hal::cpu::read_cr3();
@@ -82,16 +82,16 @@ impl Compositor {
         Ok(Self {
             job: job as usize,
             console: Surface::from_raw(console.cast(), window.width, window.height, window.width),
-            dialogs: core::array::from_fn(|slot| {
-                Surface::from_raw(dialogs.add(slot * dialog_bytes).cast(),
-                    dialog::WIDTH, dialog::HEIGHT, dialog::WIDTH)
+            windows: core::array::from_fn(|slot| {
+                Surface::from_raw(windows.add(slot * window_bytes).cast(),
+                    windows::MAX_WIDTH, windows::MAX_HEIGHT, windows::MAX_WIDTH)
             }),
         })
     }
 
-    pub fn draw_dialog(&mut self, window: &dialog::Dialog, active: bool) {
-        let rect = Rect::new(0, 0, dialog::WIDTH, dialog::HEIGHT);
-        dialog::draw(&mut self.dialogs[window.slot], rect, &window.text, true, active);
+    pub fn draw_window(&mut self, window: &DesktopWindow, active: bool) {
+        let rect = Rect::new(0, 0, window.rect.width, window.rect.height);
+        window.draw(&mut self.windows[window.slot], rect, true, active);
     }
 
     pub fn compose(
@@ -99,7 +99,7 @@ impl Compositor {
         screen: Rect,
         area: Rect,
         console: Option<(Rect, Rect)>,
-        dialogs: &[Option<dialog::Dialog>; MAX_DIALOG_SURFACES],
+        windows: &[Option<DesktopWindow>; MAX_WINDOW_SURFACES],
     ) {
         let clipped = |rect: Rect| {
             screen.intersect(&rect).map_or_else(PixelRect::default, |rect| PixelRect {
@@ -119,14 +119,14 @@ impl Compositor {
             layer_count: 0,
             layers: [WindowLayer::default(); MAX_LAYERS],
         };
-        let mut push = |rect: Rect, slot: usize, opaque: Option<Rect>| {
+        let mut push = |rect: Rect, slot: usize, stride: usize, opaque: Option<Rect>| {
             if screen.intersect(&rect).is_some() {
                 job.layers[job.layer_count] = WindowLayer {
                     bounds: clipped(rect),
                     opaque: opaque.map_or_else(PixelRect::default, clipped),
                     origin_x: rect.x,
                     origin_y: rect.y,
-                    stride: rect.width as usize,
+                    stride,
                     slot,
                     glass: opaque.is_some(),
                 };
@@ -134,11 +134,21 @@ impl Compositor {
             }
         };
         if let Some((rect, opaque)) = console {
-            push(rect, 0, Some(opaque));
+            push(rect, 0, self.console.stride as usize, Some(opaque));
         }
-        for window in dialogs.iter().flatten() {
-            push(window.rect, window.slot + 1, Some(dialog::client(window.rect)));
+        for window in windows.iter().flatten().filter(|window| window.visible()) {
+            push(window.rect, window.slot + 1, self.windows[window.slot].stride as usize, Some(dialog::client(window.rect)));
         }
+        purent_hal::kprintln!("[WIN32K-COMPOSITOR] compose called: layers={}, dirty=({},{},{},{})",
+            job.layer_count, job.dirty.left, job.dirty.top, job.dirty.right, job.dirty.bottom);
+        for i in 0..job.layer_count {
+            let l = &job.layers[i];
+            purent_hal::kprintln!("[WIN32K-COMPOSITOR] layer {}: bounds=({},{},{},{}), slot={}",
+                i, l.bounds.left, l.bounds.top, l.bounds.right, l.bounds.bottom, l.slot);
+        }
+        let w0_p = unsafe { (self.windows[0].buffer as *const u32).add(70 * 520 + 100).read() };
+        let w1_p = unsafe { (self.windows[1].buffer as *const u32).add(70 * 520 + 100).read() };
+        purent_hal::kprintln!("[WIN32K-COMPOSITOR] window 0 client center=0x{:08X}, window 1 client center=0x{:08X}", w0_p, w1_p);
         unsafe { core::ptr::write(self.job as *mut CompositionJob, job) };
         STATE.store(REQUESTED, Ordering::Release);
         while STATE.load(Ordering::Acquire) != FINISHED {

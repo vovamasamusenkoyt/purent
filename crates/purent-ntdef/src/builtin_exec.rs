@@ -1,7 +1,7 @@
 //! Image catalog and process handles for the built-in Win32 executable service.
 
 pub const SYSTEM_DIRECTORY: &[u8] = b"C:\\Windows\\System32\\";
-pub const EXECUTABLES: &[&str] = &["winver.exe"];
+pub const EXECUTABLES: &[&str] = &["winver.exe", "windowdemo.exe"];
 
 pub const PROCESS_HANDLE_TAG: usize = 0x6000_0000;
 pub const PROCESS_HANDLE_LIMIT: usize = 0x7000_0000;

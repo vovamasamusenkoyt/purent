@@ -4,8 +4,8 @@ pub const JOB_ADDRESS: u64 = 0x0100_0000_0000;
 pub const OUTPUT_ADDRESS: u64 = JOB_ADDRESS + 0x1000_0000;
 pub const SURFACE_ADDRESS: u64 = JOB_ADDRESS + 0x2000_0000;
 pub const SLOT_BYTES: u64 = 0x1000_0000;
-pub const MAX_DIALOG_SURFACES: usize = 4;
-pub const MAX_LAYERS: usize = 1 + MAX_DIALOG_SURFACES;
+pub const MAX_WINDOW_SURFACES: usize = 4;
+pub const MAX_LAYERS: usize = 1 + MAX_WINDOW_SURFACES;
 
 pub const fn surface_address(slot: usize) -> u64 {
     SURFACE_ADDRESS + slot as u64 * SLOT_BYTES

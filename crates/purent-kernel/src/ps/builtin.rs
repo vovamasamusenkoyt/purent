@@ -16,10 +16,16 @@ struct BuiltinImage {
     available: bool,
 }
 
-const IMAGES: &[BuiltinImage] = &[BuiltinImage {
-    bytes: crate::WINVER_EXE_BYTES,
-    available: !crate::WINVER_EXE_BYTES.is_empty() && !crate::WINVER_MUI_BYTES.is_empty(),
-}];
+const IMAGES: &[BuiltinImage] = &[
+    BuiltinImage {
+        bytes: crate::WINVER_EXE_BYTES,
+        available: !crate::WINVER_EXE_BYTES.is_empty() && !crate::WINVER_MUI_BYTES.is_empty(),
+    },
+    BuiltinImage {
+        bytes: include_bytes!("../../../../target/esp/windowdemo.exe"),
+        available: true,
+    },
+];
 
 const _: () = assert!(IMAGES.len() == EXECUTABLES.len());
 
@@ -218,6 +224,12 @@ pub unsafe fn service() {
             }
             result
         })();
+        kprintln!(
+            "[BUILTIN] Launching {} (PID 0x{:X}): status 0x{:08X}",
+            EXECUTABLES[catalog],
+            pid,
+            match &result { Ok(_) => 0, Err(e) => *e }
+        );
         CHILDREN.lock().slots[slot].state = match result {
             Ok((_, thread)) => State::Running(thread as usize),
             Err(status) => State::Failed(status),
@@ -237,6 +249,7 @@ pub unsafe fn service() {
         let process = (*thread).process.cast::<super::Process>();
         let code = (*process).exit_status;
         let cr3 = (*process).pcb.directory_table_base;
+        crate::win32k::windows::remove_process(child.pid);
         crate::mm::destroy_user_address_space(cr3);
         super::ps_reap_thread(thread);
         let mut children = CHILDREN.lock();

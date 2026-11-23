@@ -2,6 +2,7 @@
 //! Reverse-engineered matching Windows 7 SP1 x64 win32k.sys and user32.dll
 
 mod dialog;
+pub(crate) mod windows;
 pub(crate) mod compositor;
 pub mod console;
 pub mod desktop;
@@ -16,7 +17,7 @@ use console::ConsoleWindow;
 use desktop::Desktop;
 use purent_hal::{kprintln, Ps2Input};
 use purent_hal::sync::SpinLock;
-use purent_ntdef::dialog::DialogText;
+use purent_ntdef::{composition::MAX_WINDOW_SURFACES, dialog::DialogText};
 use purent_ntdef::loader::FramebufferInfo;
 use surface::{Rect, Surface};
 use wnd::CaptionHit;
@@ -24,15 +25,18 @@ use wnd::CaptionHit;
 pub const CONSOLE_CLIENT_PID: usize = 0x300;
 pub const CONHOST_PID: usize = 0x500;
 pub const DWM_PID: usize = 0x600;
+pub const WINDOWDEMO_PID: usize = 0x700;
 
 pub struct Win32kSubsystem {
     pub desktop: Desktop,
     pub console: ConsoleWindow,
     hw_surface: Surface,
     frame: Surface,
-    dialogs: [Option<dialog::Dialog>; dialog::MAX_DIALOGS],
+    windows: [Option<windows::DesktopWindow>; MAX_WINDOW_SURFACES],
+    message_queues: [windows::MessageQueue; MAX_WINDOW_SURFACES],
+    next_hwnd: usize,
     damage: Option<Rect>,
-    focused_dialog: Option<usize>,
+    focused_window: Option<usize>,
     compositor: Option<compositor::Compositor>,
     pub initialized: bool,
 }
@@ -54,7 +58,7 @@ impl Win32kSubsystem {
         };
         let window = &self.console.window;
         let console = (!window.is_minimized).then_some((window.rect, window.client_rect()));
-        compositor.compose(screen, region, console, &self.dialogs);
+        compositor.compose(screen, region, console, &self.windows);
         true
     }
 
@@ -62,15 +66,21 @@ impl Win32kSubsystem {
         self.damage = Some(self.damage.map_or(rect, |damage| damage.union(rect)));
     }
 
-    fn dialog_index(&self, owner: usize) -> Option<usize> {
-        self.dialogs.iter().position(|window| window.as_ref().is_some_and(|window| window.owner == owner))
+    fn window_index(&self, owner: usize) -> Option<usize> {
+        self.windows.iter().position(|window| window.as_ref().is_some_and(|window| window.id == owner))
     }
 
     fn set_focus(&mut self, owner: Option<usize>) {
-        if self.focused_dialog == owner {
+        if self.focused_window == owner {
             return;
         }
-        let previous = core::mem::replace(&mut self.focused_dialog, owner);
+        let previous = core::mem::replace(&mut self.focused_window, owner);
+        if let Some(previous) = previous {
+            self.post_window_message(previous, purent_ntdef::window::WM_KILLFOCUS, owner.unwrap_or(0));
+        }
+        if let Some(owner) = owner {
+            self.post_window_message(owner, purent_ntdef::window::WM_SETFOCUS, previous.unwrap_or(0));
+        }
         if self.console.window.is_active != owner.is_none() {
             self.console.window.is_active = owner.is_none();
             if !self.console.window.is_minimized {
@@ -81,28 +91,28 @@ impl Win32kSubsystem {
             }
         }
         for owner in [previous, owner].into_iter().flatten() {
-            if let Some(index) = self.dialog_index(owner) {
-                let window = self.dialogs[index].as_ref().expect("dialog at index");
+            if let Some(index) = self.window_index(owner) {
+                let window = self.windows[index].as_ref().expect("window at index");
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.draw_dialog(window, self.focused_dialog == Some(owner));
+                    compositor.draw_window(window, self.focused_window == Some(owner));
                 }
                 self.invalidate(window.rect);
             }
         }
     }
 
-    fn raise_dialog(&mut self, index: usize) {
-        let window = self.dialogs[index].as_ref().expect("dialog at index");
-        let owner = window.owner;
+    fn raise_window(&mut self, index: usize) {
+        let window = self.windows[index].as_ref().expect("window at index");
+        let owner = window.id;
         let rect = window.rect;
         self.set_focus(Some(owner));
-        let top = self.dialogs.iter().flatten().count() - 1;
+        let top = self.windows.iter().flatten().count() - 1;
         if index != top {
-            let window = self.dialogs[index].take();
+            let window = self.windows[index].take();
             for slot in index..top {
-                self.dialogs[slot] = self.dialogs[slot + 1].take();
+                self.windows[slot] = self.windows[slot + 1].take();
             }
-            self.dialogs[top] = window;
+            self.windows[top] = window;
             self.invalidate(rect);
         }
     }
@@ -111,15 +121,15 @@ impl Win32kSubsystem {
         let screen = self.screen();
         if let Some(compositor) = self.compositor.as_mut() {
             self.console.draw(&mut compositor.console, true);
-            for window in self.dialogs.iter().flatten() {
-                compositor.draw_dialog(window, self.focused_dialog == Some(window.owner));
+            for window in self.windows.iter().flatten() {
+                compositor.draw_window(window, self.focused_window == Some(window.id));
             }
         }
         if !self.compose_region(screen) {
             self.desktop.draw_background(&mut self.frame);
             self.console.draw(&mut self.frame, false);
-            for window in self.dialogs.iter().flatten() {
-                dialog::draw(&mut self.frame, window.rect, &window.text, false, self.focused_dialog == Some(window.owner));
+            for window in self.windows.iter().flatten() {
+                window.draw(&mut self.frame, window.rect, false, self.focused_window == Some(window.id));
             }
         }
         self.desktop.draw_cursor(&mut self.frame);
@@ -217,9 +227,11 @@ pub fn win32k_init(fb: &FramebufferInfo) {
         console,
         hw_surface,
         frame,
-        dialogs: [const { None }; dialog::MAX_DIALOGS],
+        windows: [const { None }; MAX_WINDOW_SURFACES],
+        message_queues: [const { windows::MessageQueue::EMPTY }; MAX_WINDOW_SURFACES],
+        next_hwnd: windows::HWND_BASE,
         damage: None,
-        focused_dialog: None,
+        focused_window: None,
         compositor: None,
         initialized: true,
     };
@@ -321,21 +333,20 @@ pub unsafe fn show_dialog(address: usize) -> purent_ntdef::status::NtStatus {
         let Some(subsystem) = guard.as_mut() else {
             return STATUS_INVALID_DEVICE_REQUEST;
         };
-        let Some(position) = subsystem.dialogs.iter().position(Option::is_none) else {
+        let Some((position, slot)) = subsystem.free_window_slot() else {
             return STATUS_INVALID_DEVICE_REQUEST;
         };
-        let slot = (0..dialog::MAX_DIALOGS).find(|slot| {
-            subsystem.dialogs.iter().flatten().all(|dialog| dialog.slot != *slot)
-        }).expect("a free dialog slot");
         let rect = dialog::initial_bounds(subsystem.frame.width, subsystem.frame.height, slot);
-        let window = dialog::Dialog { owner, slot, text, rect };
-        subsystem.dialogs[position] = Some(window);
+        let window = windows::DesktopWindow {
+            id: owner, slot, rect, content: windows::WindowContent::Modal(text),
+        };
+        subsystem.windows[position] = Some(window);
         subsystem.set_focus(Some(owner));
     }
     kprintln!("[WIN32K] USER32 requested a modal dialog (PID: 0x{:X})", owner);
     loop {
         let pending = WIN32K.lock().as_ref().is_some_and(|subsystem| {
-            subsystem.dialogs.iter().flatten().any(|dialog| dialog.owner == owner)
+            subsystem.windows.iter().flatten().any(|dialog| dialog.id == owner)
         });
         if !pending {
             return STATUS_SUCCESS;
@@ -344,18 +355,30 @@ pub unsafe fn show_dialog(address: usize) -> purent_ntdef::status::NtStatus {
     }
 }
 
+impl Win32kSubsystem {
+    fn top_window(&self) -> Option<usize> {
+        self.windows.iter().rev().flatten().find(|window| window.visible()).map(|window| window.id)
+    }
+
+    fn remove_window(&mut self, hwnd: usize) {
+        let Some(index) = self.window_index(hwnd) else { return };
+        let window = self.windows[index].take().expect("window index");
+        if window.visible() {
+            self.invalidate(window.rect);
+        }
+        for slot in index..self.windows.len() - 1 {
+            self.windows[slot] = self.windows[slot + 1].take();
+        }
+        let last = self.windows.len() - 1;
+        self.windows[last] = None;
+        if self.focused_window == Some(hwnd) {
+            self.set_focus(self.top_window());
+        }
+    }
+}
+
 fn dismiss_dialog(subsystem: &mut Win32kSubsystem, owner: usize) {
-    let Some(index) = subsystem.dialog_index(owner) else { return };
-    let window = subsystem.dialogs[index].take().expect("dialog at index");
-    subsystem.invalidate(window.rect);
-    for slot in index..dialog::MAX_DIALOGS - 1 {
-        subsystem.dialogs[slot] = subsystem.dialogs[slot + 1].take();
-    }
-    subsystem.dialogs[dialog::MAX_DIALOGS - 1] = None;
-    if subsystem.focused_dialog == Some(owner) {
-        let next = subsystem.dialogs.iter().flatten().last().map(|dialog| dialog.owner);
-        subsystem.set_focus(next);
-    }
+    subsystem.remove_window(owner);
     kprintln!("[WIN32K] Dismissed modal dialog (PID: 0x{:X})", owner);
 }
 
@@ -364,23 +387,23 @@ enum PointerCapture {
     None,
     DragConsole { offset_x: i32, offset_y: i32 },
     CloseConsole,
-    DragDialog { owner: usize, offset_x: i32, offset_y: i32 },
-    CloseDialog { owner: usize, caption: bool },
+    DragWindow { owner: usize, offset_x: i32, offset_y: i32 },
+    CloseWindow { owner: usize, caption: bool },
 }
 
 fn capture_pointer(subsystem: &mut Win32kSubsystem, x: i32, y: i32) -> PointerCapture {
-    if let Some(index) = subsystem.dialogs.iter().rposition(|window| {
-        window.as_ref().is_some_and(|window| window.rect.contains(x, y))
+    if let Some(index) = subsystem.windows.iter().rposition(|window| {
+        window.as_ref().is_some_and(|window| window.visible() && window.rect.contains(x, y))
     }) {
-        let window = subsystem.dialogs[index].as_ref().expect("dialog at index");
-        let (owner, rect) = (window.owner, window.rect);
-        subsystem.raise_dialog(index);
+        let window = subsystem.windows[index].as_ref().expect("window at index");
+        let (owner, rect, modal) = (window.id, window.rect, window.is_modal());
+        subsystem.raise_window(index);
         let caption = dialog::close_button(rect).contains(x, y);
-        if caption || dialog::ok_button(rect).contains(x, y) {
-            return PointerCapture::CloseDialog { owner, caption };
+        if caption || (modal && dialog::ok_button(rect).contains(x, y)) {
+            return PointerCapture::CloseWindow { owner, caption };
         }
         if dialog::caption(rect).contains(x, y) {
-            return PointerCapture::DragDialog { owner, offset_x: x - rect.x, offset_y: y - rect.y };
+            return PointerCapture::DragWindow { owner, offset_x: x - rect.x, offset_y: y - rect.y };
         }
         return PointerCapture::None;
     }
@@ -406,9 +429,9 @@ fn drag_pointer(subsystem: &mut Win32kSubsystem, capture: PointerCapture, x: i32
         PointerCapture::DragConsole { offset_x, offset_y } => {
             (&mut subsystem.console.window.rect, x - offset_x, y - offset_y)
         }
-        PointerCapture::DragDialog { owner, offset_x, offset_y } => {
-            let Some(index) = subsystem.dialog_index(owner) else { return };
-            let rect = &mut subsystem.dialogs[index].as_mut().expect("dialog at index").rect;
+        PointerCapture::DragWindow { owner, offset_x, offset_y } => {
+            let Some(index) = subsystem.window_index(owner) else { return };
+            let rect = &mut subsystem.windows[index].as_mut().expect("window at index").rect;
             let new_x = (x - offset_x).clamp(0, width.saturating_sub(rect.width) as i32);
             let new_y = (y - offset_y).clamp(0, height.saturating_sub(rect.height) as i32);
             (rect, new_x, new_y)
@@ -438,12 +461,12 @@ fn release_pointer(subsystem: &mut Win32kSubsystem, capture: PointerCapture, x: 
             }
             subsystem.invalidate(rect);
         }
-        PointerCapture::CloseDialog { owner, caption } => {
-            let Some(index) = subsystem.dialog_index(owner) else { return };
-            let rect = subsystem.dialogs[index].as_ref().expect("dialog at index").rect;
+        PointerCapture::CloseWindow { owner, caption } => {
+            let Some(index) = subsystem.window_index(owner) else { return };
+            let rect = subsystem.windows[index].as_ref().expect("window at index").rect;
             let button = if caption { dialog::close_button(rect) } else { dialog::ok_button(rect) };
             if button.contains(x, y) {
-                dismiss_dialog(subsystem, owner);
+                subsystem.request_close(owner);
             }
         }
         _ => {}
@@ -466,15 +489,17 @@ pub unsafe fn win32k_run_event_loop(mut cmd_thread: *mut purent_ntdef::kpcr::KTh
             Some(Ps2Input::Keyboard(scan)) => {
                 let Some(ch) = keyboard.decode(scan) else { continue };
                 if let Some(subsystem) = WIN32K.lock().as_mut() {
-                    if ch == b'\t' && subsystem.dialogs[0].is_some() {
-                        let owner = if subsystem.focused_dialog.is_some() {
+                    if ch == b'\t' && subsystem.top_window().is_some() {
+                        let owner = if subsystem.focused_window.is_some() {
                             None
                         } else {
-                            subsystem.dialogs.iter().flatten().last().map(|window| window.owner)
+                            subsystem.top_window()
                         };
                         subsystem.set_focus(owner);
-                    } else if let Some(owner) = subsystem.focused_dialog {
-                        if matches!(ch, 13 | 27) {
+                    } else if let Some(owner) = subsystem.focused_window {
+                        if matches!(ch, 13 | 27) && subsystem.window_index(owner).is_some_and(|index| {
+                            subsystem.windows[index].as_ref().is_some_and(windows::DesktopWindow::is_modal)
+                        }) {
                             dismiss_dialog(subsystem, owner);
                         }
                     } else if !matches!(ch, 9 | 27) {

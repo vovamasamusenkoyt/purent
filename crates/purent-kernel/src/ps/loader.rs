@@ -449,6 +449,7 @@ pub unsafe fn ps_seal_win32_image(image: u64) -> NtStatus {
     let pe = if image == purent_ntdef::syscall::CURRENT_EXECUTABLE_IMAGE {
         let bytes = match crate::ps::current_process_id() {
             Some(crate::win32k::CONSOLE_CLIENT_PID) => crate::CMD_EXE_BYTES,
+            Some(crate::win32k::WINDOWDEMO_PID) => crate::WINDOWDEMO_EXE_BYTES,
             Some(pid) => match super::builtin::image_for_pid(pid) {
                 Some(bytes) => bytes,
                 None => return STATUS_INVALID_PARAMETER,

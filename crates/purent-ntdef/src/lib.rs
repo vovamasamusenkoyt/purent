@@ -26,3 +26,5 @@ pub use string::*;
 pub use syscall::*;
 
 pub mod win32_modules;
+
+pub mod window;

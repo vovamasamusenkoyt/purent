@@ -31,7 +31,7 @@ purent/
 │   ├── purent-ntdef/      # NT 64-bit architectural definitions
 │   └── purent-pe/         # PE32+ parser and relocation engine
 ├── xtask/                 # PureNT build orchestrator and QEMU harness
-├── LICENSE-AGPL           # GNU Affero GPLv3 (Kernel)
+├── LICENSE                # GNU GPLv2 (Kernel)
 ├── LICENSE-BSD            # BSD 3-Clause (Libraries & Bootloader)
 └── Cargo.toml
 ```

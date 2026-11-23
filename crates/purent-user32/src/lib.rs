@@ -95,3 +95,5 @@ pub unsafe extern "system" fn PureNtShowDialog(
     use purent_ntdef::syscall::{nt_syscall1, SYSCALL_PURENT_SHOW_DIALOG};
     (nt_syscall1(SYSCALL_PURENT_SHOW_DIALOG, text as u64) == 0) as i32
 }
+
+mod windows;

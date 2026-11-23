@@ -9,6 +9,7 @@ members = [
     "crates/apps/smss",
     "crates/apps/conhost",
     "crates/apps/dwm",
+    "crates/apps/windowdemo",
     "crates/purent-kernel32",
     "crates/purent-kernelbase",
     "crates/purent-ntdll",

@@ -2,18 +2,10 @@ use purent_ntdef::dialog::DialogText;
 
 use super::{surface::{Rect, Surface}, ui_font::{DISPLAY, LABEL}, wnd::{FrameControls, NonClient}};
 
-pub use purent_ntdef::composition::MAX_DIALOG_SURFACES as MAX_DIALOGS;
 pub const WIDTH: u32 = 430;
 pub const HEIGHT: u32 = 236;
 pub const CAPTION_HEIGHT: u32 = 35;
 const BORDER: u32 = 7;
-
-pub struct Dialog {
-    pub owner: usize,
-    pub slot: usize,
-    pub text: DialogText,
-    pub rect: Rect,
-}
 
 pub fn initial_bounds(width: u32, height: u32, slot: usize) -> Rect {
     let max_x = width.saturating_sub(WIDTH) as i32;

@@ -54,12 +54,13 @@ fn build() {
     let dest_smss = esp_dir.join("smss.exe");
     fs::copy(&smss_binary, &dest_smss).expect("Failed to copy smss.exe");
 
-    for (package, executable, base) in [
-        ("conhost", "conhost.exe", "0x00500000"),
-        ("purent-dwm", "dwm.exe", "0x00600000"),
+    for (package, executable, base, subsystem) in [
+        ("conhost", "conhost.exe", "0x00500000", "native"),
+        ("purent-dwm", "dwm.exe", "0x00600000", "native"),
+        ("windowdemo", "windowdemo.exe", "0x140000000", "windows"),
     ] {
         let flags = format!(
-            "-C linker=lld-link -C link-arg=/entry:main -C link-arg=/subsystem:native -C link-arg=/base:{base} -C link-arg=/nodefaultlib"
+            "-C linker=lld-link -C link-arg=/entry:main -C link-arg=/subsystem:{subsystem} -C link-arg=/base:{base} -C link-arg=/nodefaultlib"
         );
         let status = Command::new("cargo")
             .current_dir(&root)
@@ -229,7 +230,7 @@ fn screenshot() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    std::thread::sleep(std::time::Duration::from_secs(12));
 
     // Send screendump command via unix socket
     use std::io::{Read, Write};

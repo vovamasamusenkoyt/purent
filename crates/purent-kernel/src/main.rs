@@ -245,6 +245,18 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     let (_cmd_proc, cmd_thread) = ps::ps_create_win32_process(
         CMD_EXE_BYTES, "cmd.exe", win32k::CONSOLE_CLIENT_PID, 0x550000, loader_entry, cr3,
     ).expect("cmd.exe");
+    let demo_cr3 = mm::create_user_address_space().expect("demo cr3");
+    ps::ps_map_user_shared_data(demo_cr3).expect("demo shared data");
+    let demo_loader = ps::ps_load_ntdll(demo_cr3).expect("demo ntdll");
+    let (_demo_proc, _demo_thread) = ps::ps_create_win32_process(
+        WINDOWDEMO_EXE_BYTES,
+        "windowdemo.exe",
+        win32k::WINDOWDEMO_PID,
+        0x1550000,
+        demo_loader,
+        demo_cr3,
+    ).expect("windowdemo.exe");
+
     kprintln!("[PureNT] Entering interactive Win32k Desktop & Mouse event loop...");
     win32k::win32k_run_event_loop(cmd_thread);
 }
@@ -253,6 +265,7 @@ static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows
 static DWM_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/dwm.exe");
 static CONHOST_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/conhost.exe");
 static CMD_EXE_BYTES: &[u8] = include_bytes!("../../../refs/win7_7601_x64/binaries/cmd.exe");
+static WINDOWDEMO_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/windowdemo.exe");
 static WINVER_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/winver.exe");
 static WINVER_MUI_BYTES: &[u8] = include_bytes!("../../../target/esp/winver.exe.mui");
 

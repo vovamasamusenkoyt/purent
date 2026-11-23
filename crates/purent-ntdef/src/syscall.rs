@@ -20,6 +20,7 @@ pub const SYSCALL_PURENT_START_BUILTIN: u64 = 0x800A;
 pub const SYSCALL_PURENT_WAIT_CHILD: u64 = 0x800B;
 pub const SYSCALL_PURENT_CLOSE_CHILD: u64 = 0x800C;
 pub const SYSCALL_PURENT_CHILD_EXIT_CODE: u64 = 0x800D;
+pub const SYSCALL_PURENT_WINDOW: u64 = 0x800E;
 
 /// Packed console output uses the low 24 bits for bytes and the next byte for length.
 pub const CONSOLE_OUTPUT_LENGTH_SHIFT: u32 = 24;

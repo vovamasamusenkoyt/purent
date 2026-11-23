@@ -2,6 +2,7 @@
 //! Implements hardware initialization, packet streaming, and event polling for GUI desktop
 
 use crate::cpu::{inb, outb};
+use crate::kprintln;
 
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
@@ -56,9 +57,20 @@ unsafe fn read_data() -> u8 {
     }
 }
 
-/// Initializes the 8042 PS/2 controller auxiliary device and activates mouse data reporting
+unsafe fn mouse_cmd(cmd: u8) -> bool {
+    write_mouse(cmd);
+    read_data() == 0xFA
+}
+
+/// Initializes the 8042 PS/2 controller auxiliary device and activates mouse data reporting.
+/// Safe init sequence that works under QEMU PS/2 emulation (no device reset, which can break
+/// the emulated aux port):
+///   1. Enable auxiliary mouse device (0xA8)
+///   2. Configure controller config byte (enable aux port, IRQ12)
+///   3. Set sampling rate 200 (0xF3, 0xC8)
+///   4. Set resolution 3 (0xE8, 0x03)  — 4 pulses/mm
+///   5. Enable data packet streaming (0xF4)
 pub unsafe fn ps2_mouse_init() {
-    write_command(0xAE); // Enable the keyboard port.
     // 1. Enable auxiliary mouse device
     write_command(0xA8);
 
@@ -66,20 +78,35 @@ pub unsafe fn ps2_mouse_init() {
     write_command(0x20);
     let mut config = read_data();
 
-    // Poll both ports and translate keyboard scan codes to set 1.
+    // Enable auxiliary port, disable keyboard translation, enable mouse interrupts (IRQ12)
     config = (config | 0x40) & !0x33;
 
     write_command(0x60);
     wait_write();
     outb(DATA_PORT, config);
 
-    // 3. Set mouse to default configuration
-    write_mouse(0xF6);
-    let _ = read_data(); // ACK (0xFA)
+    // 3. Set sampling rate to 200 reports/sec
+    if !mouse_cmd(0xF3) {
+        kprintln!("[MOUSE] PS/2: failed to set sampling rate command");
+    }
+    if !mouse_cmd(200) {
+        kprintln!("[MOUSE] PS/2: failed to set sampling rate value (200)");
+    }
 
-    // 4. Enable data packet streaming
-    write_mouse(0xF4);
-    let _ = read_data(); // ACK (0xFA)
+    // 4. Set resolution to 3 (4 pulses per mm)
+    if !mouse_cmd(0xE8) {
+        kprintln!("[MOUSE] PS/2: failed to set resolution command");
+    }
+    if !mouse_cmd(3) {
+        kprintln!("[MOUSE] PS/2: failed to set resolution value (3)");
+    }
+
+    // 5. Enable data packet streaming
+    if !mouse_cmd(0xF4) {
+        kprintln!("[MOUSE] PS/2: failed to enable streaming");
+    }
+
+    kprintln!("[MOUSE] PS/2 mouse initialized (streaming enabled)");
 }
 
 pub enum Ps2Input {
