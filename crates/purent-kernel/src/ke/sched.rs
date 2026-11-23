@@ -48,10 +48,26 @@ pub static mut BOOT_THREAD: KThread = KThread {
     padding_3b: [0; 0x169],
 };
 
+#[derive(Clone, Copy)]
+struct EventWait {
+    thread: usize,
+    event: usize,
+    start: u64,
+    duration: Option<u64>,
+}
+
+impl EventWait {
+    unsafe fn ready(&self, now: u64) -> bool {
+        (*(self.event as *const super::sync::KernelEvent)).is_signaled()
+            || self.duration.is_some_and(|ticks| now.wrapping_sub(self.start) >= ticks)
+    }
+}
+
 pub struct SchedulerQueue {
     pub ready_threads: [*mut KThread; MAX_READY_THREADS],
     pub ready_count: usize,
     pub current_index: usize,
+    event_waits: [Option<EventWait>; MAX_READY_THREADS],
 }
 
 unsafe impl Send for SchedulerQueue {}
@@ -60,7 +76,63 @@ pub static SCHED_QUEUE: purent_hal::SpinLock<SchedulerQueue> = purent_hal::SpinL
     ready_threads: [core::ptr::null_mut(); MAX_READY_THREADS],
     ready_count: 0,
     current_index: 0,
+    event_waits: [None; MAX_READY_THREADS],
 });
+
+impl SchedulerQueue {
+    unsafe fn thread_ready(&self, index: usize, now: u64) -> bool {
+        self.event_waits.iter().flatten()
+            .find(|wait| wait.thread == self.ready_threads[index] as usize)
+            .is_none_or(|wait| wait.ready(now))
+    }
+
+    unsafe fn next_ready(&self) -> Option<usize> {
+        let now = super::sync::KernelEvent::ticks();
+        (1..self.ready_count)
+            .map(|offset| (self.current_index + offset) % self.ready_count)
+            .find(|&index| self.thread_ready(index, now))
+    }
+
+    pub unsafe fn select_after_termination(&mut self) -> *mut KThread {
+        let now = super::sync::KernelEvent::ticks();
+        // If every remaining thread is sleeping, resume one as the idle waiter.
+        for offset in 0..self.ready_count {
+            let index = (self.current_index + offset) % self.ready_count;
+            if self.thread_ready(index, now) {
+                self.current_index = index;
+                break;
+            }
+        }
+        self.ready_threads[self.current_index]
+    }
+}
+
+/// Register the wait before sleeping so the timer skips the thread until ready.
+pub unsafe fn wait_for_event_tick(
+    event: &super::sync::KernelEvent,
+    start: u64,
+    duration: Option<u64>,
+) {
+    let (slot, thread) = {
+        let mut queue = SCHED_QUEUE.lock();
+        let thread = queue.ready_threads[queue.current_index];
+        let slot = queue.event_waits.iter().position(Option::is_none).expect("one wait per thread");
+        queue.event_waits[slot] = Some(EventWait {
+            thread: thread as usize,
+            event: event as *const _ as usize,
+            start,
+            duration,
+        });
+        (*thread).state = ThreadState::Waiting as u8;
+        (slot, thread)
+    };
+
+    purent_hal::cpu::halt();
+
+    let mut queue = SCHED_QUEUE.lock();
+    queue.event_waits[slot] = None;
+    (*thread).state = ThreadState::Running as u8;
+}
 
 pub unsafe fn sched_init() {
     INITIAL_PROCESS.directory_table_base = purent_hal::cpu::read_cr3();
@@ -161,27 +233,21 @@ pub unsafe fn ki_quantum_end() {
         }
 
         (*curr).quantum -= 1;
-        if (*curr).quantum > 0 {
+        if (*curr).quantum > 0 && (*curr).state != ThreadState::Waiting as u8 {
             return;
         }
         (*curr).quantum = DEFAULT_QUANTUM;
 
-        let next_idx = (q.current_index + 1) % q.ready_count;
+        let Some(next_idx) = q.next_ready() else { return };
         let next = q.ready_threads[next_idx];
-        if next == curr {
-            return;
+        if (*curr).state == ThreadState::Running as u8 {
+            (*curr).state = ThreadState::Ready as u8;
         }
         q.current_index = next_idx;
         (curr, next)
     };
 
-    let switch_count = CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    kprintln!(
-        "[PREEMPT-TIMER] Quantum expired for KTHREAD 0x{:016X} -> Switching to 0x{:016X} (Context Switch #{})",
-        curr_thread as usize,
-        next_thread as usize,
-        switch_count
-    );
+    CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
     KiSwapContext(curr_thread, next_thread);
 }
 
@@ -193,10 +259,10 @@ pub unsafe fn ki_yield() {
             return;
         }
         let curr = q.ready_threads[q.current_index];
-        let next_idx = (q.current_index + 1) % q.ready_count;
+        let Some(next_idx) = q.next_ready() else { return };
         let next = q.ready_threads[next_idx];
-        if next == curr {
-            return;
+        if (*curr).state == ThreadState::Running as u8 {
+            (*curr).state = ThreadState::Ready as u8;
         }
         q.current_index = next_idx;
         (curr, next)

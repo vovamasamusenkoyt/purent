@@ -16,6 +16,11 @@ extern "system" {
     fn LoadLibraryExW(name: *const u16, file: usize, flags: u32) -> usize;
 }
 
+use crate::builtin_process;
+use purent_ntdef::builtin_exec::decode_child_handle;
+use purent_ntdef::syscall::{nt_syscall1_raw, SYSCALL_PURENT_CHILD_EXIT_CODE,
+    SYSCALL_PURENT_CLOSE_CHILD, SYSCALL_PURENT_WAIT_CHILD};
+
 pub static mut LAST_ERROR: u32 = 0;
 
 // Standard Handle Constants
@@ -335,11 +340,26 @@ pub unsafe extern "win64" fn GetCommandLineW() -> *const u16 {
 
 #[no_mangle]
 pub unsafe extern "win64" fn GetEnvironmentVariableW(
-    _name: *const u16,
-    _buffer: *mut u16,
-    _size: u32,
+    name: *const u16, buffer: *mut u16, size: u32,
 ) -> u32 {
-    0
+    let Some(name) = builtin_process::wide_string(name) else { return 0 };
+    let value: &[u8] = if builtin_process::matches(name, b"PATH") {
+        b"C:\\Windows\\System32"
+    } else if builtin_process::matches(name, b"PATHEXT") {
+        b".COM;.EXE;.BAT;.CMD"
+    } else {
+        LAST_ERROR = 203; // ERROR_ENVVAR_NOT_FOUND
+        return 0;
+    };
+    let len = value.len();
+    if buffer.is_null() || size as usize <= len {
+        return (len + 1) as u32;
+    }
+    for (index, &byte) in value.iter().enumerate() {
+        *buffer.add(index) = byte as u16;
+    }
+    *buffer.add(len) = 0;
+    len as u32
 }
 
 #[no_mangle]
@@ -349,10 +369,16 @@ pub unsafe extern "win64" fn SetEnvironmentVariableW(_name: *const u16, _value: 
 
 #[no_mangle]
 pub unsafe extern "win64" fn GetEnvironmentStringsW() -> *const u16 {
-    static ENV_STRINGS: [u16; 16] = [
-        'P' as u16, 'A' as u16, 'T' as u16, 'H' as u16, '=' as u16, 'C' as u16, ':' as u16,
-        '\\' as u16, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
+    const TEXT: &[u8] = b"PATH=C:\\Windows\\System32\0PATHEXT=.COM;.EXE;.BAT;.CMD\0\0";
+    static ENV_STRINGS: [u16; TEXT.len()] = {
+        let mut result = [0; TEXT.len()];
+        let mut i = 0;
+        while i < TEXT.len() {
+            result[i] = TEXT[i] as u16;
+            i += 1;
+        }
+        result
+    };
     ENV_STRINGS.as_ptr()
 }
 
@@ -464,13 +490,26 @@ pub unsafe extern "win64" fn TerminateProcess(_proc: usize, exit_code: u32) -> i
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn WaitForSingleObject(_handle: usize, _ms: u32) -> u32 {
-    0 // WAIT_OBJECT_0
+pub unsafe extern "win64" fn WaitForSingleObject(handle: usize, milliseconds: u32) -> u32 {
+    if decode_child_handle(handle).is_none() {
+        return 0;
+    }
+    let result = nt_syscall2(SYSCALL_PURENT_WAIT_CHILD, handle as u64, milliseconds as u64);
+    if result < 0 {
+        LAST_ERROR = 6; // ERROR_INVALID_HANDLE
+        u32::MAX
+    } else {
+        result as u32
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn CloseHandle(handle: usize) -> i32 {
-    let st = nt_syscall1(0x0C, handle as u64); // NtClose
+    let service = if decode_child_handle(handle).is_some() { SYSCALL_PURENT_CLOSE_CHILD } else { 0x0C };
+    let st = nt_syscall1(service, handle as u64);
+    if st < 0 {
+        LAST_ERROR = 6; // ERROR_INVALID_HANDLE
+    }
     if st >= 0 { 1 } else { 0 }
 }
 
@@ -1015,9 +1054,12 @@ pub unsafe extern "win64" fn GetThreadGroupAffinity(_thread: usize, group_affini
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn FindFirstFileExW(_name: *const u16, _lvl: i32, _data: *mut Win32FindDataW, _search_op: i32, _filter: *mut core::ffi::c_void, _flags: u32) -> usize {
-    LAST_ERROR = 2; // ERROR_FILE_NOT_FOUND
-    !0usize
+pub unsafe extern "win64" fn FindFirstFileExW(name: *const u16, level: i32, data: *mut Win32FindDataW, search_op: i32, _filter: *mut core::ffi::c_void, _flags: u32) -> usize {
+    if !matches!(level, 0 | 1) || search_op != 0 {
+        LAST_ERROR = 87;
+        return usize::MAX;
+    }
+    FindFirstFileW(name, data)
 }
 
 #[no_mangle]
@@ -1047,8 +1089,21 @@ pub unsafe extern "win64" fn CompareFileTime(ft1: *const FileTime, ft2: *const F
 pub unsafe extern "win64" fn RemoveDirectoryW(_path: *const u16) -> i32 { 0 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn GetExitCodeProcess(_handle: usize, exit_code: *mut u32) -> i32 {
-    if !exit_code.is_null() { *exit_code = 0; }
+pub unsafe extern "win64" fn GetExitCodeProcess(handle: usize, exit_code: *mut u32) -> i32 {
+    if exit_code.is_null() {
+        LAST_ERROR = 87;
+        return 0;
+    }
+    if decode_child_handle(handle).is_some() {
+        let result = nt_syscall1_raw(SYSCALL_PURENT_CHILD_EXIT_CODE, handle as u64);
+        if result > u32::MAX as u64 {
+            LAST_ERROR = 6;
+            return 0;
+        }
+        *exit_code = result as u32;
+    } else {
+        *exit_code = 0;
+    }
     1
 }
 
@@ -1077,12 +1132,18 @@ pub unsafe extern "win64" fn DuplicateHandle(_src_proc: usize, src_h: usize, _tg
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn GetFileAttributesExW(_path: *const u16, _level: i32, data: *mut Win32FileAttributeData) -> i32 {
-    if !data.is_null() {
-        (*data).file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
-        (*data).file_size_high = 0;
-        (*data).file_size_low = 0;
+pub unsafe extern "win64" fn GetFileAttributesExW(path: *const u16, level: i32, data: *mut Win32FileAttributeData) -> i32 {
+    if level != 0 || data.is_null() {
+        LAST_ERROR = 87;
+        return 0;
     }
+    let Some((attributes, size)) = builtin_process::wide_string(path).and_then(|name| builtin_process::attributes(name)) else {
+        LAST_ERROR = 2;
+        return 0;
+    };
+    core::ptr::write_bytes(data, 0, 1);
+    (*data).file_attributes = attributes;
+    (*data).file_size_low = size;
     1
 }
 
@@ -1109,9 +1170,8 @@ pub unsafe extern "win64" fn SetFilePointerEx(_handle: usize, distance: i64, new
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn SearchPathW(_path: *const u16, _file: *const u16, _ext: *const u16, _buf_len: u32, _buf: *mut u16, _file_part: *mut *mut u16) -> u32 {
-    LAST_ERROR = 2; // ERROR_FILE_NOT_FOUND
-    0
+pub unsafe extern "win64" fn SearchPathW(_path: *const u16, file: *const u16, ext: *const u16, capacity: u32, buffer: *mut u16, part: *mut *mut u16) -> u32 {
+    builtin_process::search(file, ext, capacity, buffer, part)
 }
 
 #[no_mangle]
@@ -1147,9 +1207,24 @@ pub unsafe extern "win64" fn SetFilePointer(_handle: usize, distance: i32, high_
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn FindFirstFileW(_path: *const u16, _data: *mut Win32FindDataW) -> usize {
-    LAST_ERROR = 2; // ERROR_FILE_NOT_FOUND
-    !0usize
+pub unsafe extern "win64" fn FindFirstFileW(path: *const u16, data: *mut Win32FindDataW) -> usize {
+    if data.is_null() {
+        LAST_ERROR = 87;
+        return usize::MAX;
+    }
+    let Some((index, name, size)) = builtin_process::wide_string(path)
+        .and_then(|name| builtin_process::lookup_pattern(name, false, true))
+    else {
+        LAST_ERROR = 2;
+        return usize::MAX;
+    };
+    core::ptr::write_bytes(data, 0, 1);
+    (*data).file_attributes = 0x80;
+    (*data).file_size_low = size;
+    for (index, byte) in name.bytes().enumerate() {
+        (*data).file_name[index] = byte as u16;
+    }
+    0x5000_0000 + index
 }
 
 #[no_mangle]
@@ -1238,8 +1313,19 @@ pub unsafe extern "win64" fn SetEnvironmentStringsW(_env: *mut u16) -> i32 { 1 }
 pub unsafe extern "win64" fn GetVDMCurrentDirectories(_size: u32, _buf: *mut u16) -> u32 { 0 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn InitializeProcThreadAttributeList(_list: *mut core::ffi::c_void, _count: u32, _flags: u32, size: *mut usize) -> i32 {
-    if !size.is_null() { *size = 64; }
+pub unsafe extern "win64" fn InitializeProcThreadAttributeList(list: *mut core::ffi::c_void, count: u32, flags: u32, size: *mut usize) -> i32 {
+    if size.is_null() || flags != 0 || count == 0 {
+        LAST_ERROR = 87;
+        return 0;
+    }
+    let required = 24 + 24 * count as usize;
+    let capacity = *size;
+    *size = required;
+    if list.is_null() || capacity < required {
+        LAST_ERROR = 122;
+        return 0;
+    }
+    core::ptr::write_bytes(list.cast::<u8>(), 0, required);
     1
 }
 
@@ -1262,8 +1348,8 @@ pub unsafe extern "win64" fn GetStartupInfoW(si: *mut StartupInfoW) {
 
 #[no_mangle]
 pub unsafe extern "win64" fn CreateProcessW(
-    _app_name: *const u16,
-    _cmd_line: *mut u16,
+    app_name: *const u16,
+    cmd_line: *mut u16,
     _proc_sec: *mut core::ffi::c_void,
     _thread_sec: *mut core::ffi::c_void,
     _inherit_handles: i32,
@@ -1271,22 +1357,35 @@ pub unsafe extern "win64" fn CreateProcessW(
     _env: *mut core::ffi::c_void,
     _current_dir: *const u16,
     _startup_info: *const StartupInfoW,
-    _proc_info: *mut core::ffi::c_void,
+    proc_info: *mut core::ffi::c_void,
 ) -> i32 {
-    LAST_ERROR = 120; // ERROR_CALL_NOT_IMPLEMENTED
-    0
+    builtin_process::create(app_name, cmd_line, proc_info)
 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn GetFileAttributesW(_path: *const u16) -> u32 {
-    0x80 // FILE_ATTRIBUTE_NORMAL
+pub unsafe extern "win64" fn GetFileAttributesW(path: *const u16) -> u32 {
+    if let Some((attributes, _)) = builtin_process::wide_string(path).and_then(|name| builtin_process::attributes(name)) {
+        attributes
+    } else {
+        LAST_ERROR = 2;
+        u32::MAX
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn NeedCurrentDirectoryForExePathW(_name: *const u16) -> i32 { 0 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn GetBinaryTypeW(_path: *const u16, bin_type: *mut u32) -> i32 {
-    if !bin_type.is_null() { *bin_type = 0; }
-    0
+pub unsafe extern "win64" fn GetBinaryTypeW(path: *const u16, bin_type: *mut u32) -> i32 {
+    if bin_type.is_null() {
+        LAST_ERROR = 87;
+        return 0;
+    }
+    if builtin_process::wide_string(path).and_then(|name| builtin_process::lookup(name, false)).is_some() {
+        *bin_type = 6; // SCS_64BIT_BINARY
+        1
+    } else {
+        LAST_ERROR = 2;
+        0
+    }
 }

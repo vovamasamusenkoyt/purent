@@ -15,6 +15,11 @@ pub const SYSCALL_PURENT_COMPOSE_FINISH: u64 = 0x8006;
 pub const SYSCALL_PURENT_MAP_DLL: u64 = 0x8007;
 pub const SYSCALL_PURENT_SEAL_IMAGE: u64 = 0x8008;
 pub const CURRENT_EXECUTABLE_IMAGE: u64 = u64::MAX;
+pub const SYSCALL_PURENT_OPEN_BUILTIN: u64 = 0x8009;
+pub const SYSCALL_PURENT_START_BUILTIN: u64 = 0x800A;
+pub const SYSCALL_PURENT_WAIT_CHILD: u64 = 0x800B;
+pub const SYSCALL_PURENT_CLOSE_CHILD: u64 = 0x800C;
+pub const SYSCALL_PURENT_CHILD_EXIT_CODE: u64 = 0x800D;
 
 /// Packed console output uses the low 24 bits for bytes and the next byte for length.
 pub const CONSOLE_OUTPUT_LENGTH_SHIFT: u32 = 24;
@@ -97,7 +102,12 @@ pub unsafe fn nt_syscall0(nr: u64) -> NtStatus {
 
 #[inline(always)]
 pub unsafe fn nt_syscall1(nr: u64, a1: u64) -> NtStatus {
-    let status: i32;
+    nt_syscall1_raw(nr, a1) as NtStatus
+}
+
+#[inline(always)]
+pub unsafe fn nt_syscall1_raw(nr: u64, a1: u64) -> u64 {
+    let status: u64;
     core::arch::asm!(
         "mov r10, {a1}",
         "mov eax, {nr:e}",

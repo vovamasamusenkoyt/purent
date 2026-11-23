@@ -155,11 +155,17 @@ impl ConsoleWindow {
     }
 
     pub fn draw_text_surface(&mut self, surface: &mut Surface) {
+        self.draw_text_at(surface, self.text_rect());
+    }
+
+    pub fn draw_redirected_text(&mut self, surface: &mut Surface) {
+        self.draw_text_at(surface, Rect::new(TEXT_X, TEXT_Y, TEXT_WIDTH, TEXT_HEIGHT));
+    }
+
+    fn draw_text_at(&mut self, surface: &mut Surface, rect: Rect) {
         if self.text_dirty {
             self.rasterize_text();
         }
-
-        let rect = self.text_rect();
         // The console's pixel buffer is separate from the composition target.
         unsafe { surface.blit_opaque(&self.text_surface, rect.x, rect.y) };
     }
@@ -169,11 +175,19 @@ impl ConsoleWindow {
             return;
         }
 
-        let rx = self.window.rect.x;
-        let ry = self.window.rect.y;
-        self.window.draw_glass(surface, redirected);
-        self.window.draw_frame(surface);
-        self.draw_text_surface(surface);
+        let mut window = self.window;
+        if redirected {
+            window.rect.x = 0;
+            window.rect.y = 0;
+        }
+        let rx = window.rect.x;
+        let ry = window.rect.y;
+        window.draw_chrome(surface, redirected);
+        if redirected {
+            self.draw_redirected_text(surface);
+        } else {
+            self.draw_text_surface(surface);
+        }
 
         // 5. Vertical Scrollbar (x = rx + 538..rx + 555, y = ry + 32..ry + 320)
         let vx = rx + 538;

@@ -1,18 +1,58 @@
 //! NT Kernel Synchronization Primitives and Bug Check
 
+use core::sync::atomic::{AtomicI32, Ordering};
+
 use purent_hal::kprintln;
-use purent_ntdef::status::{NtStatus, STATUS_SUCCESS};
+use purent_ntdef::status::{NtStatus, STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_SUCCESS, STATUS_TIMEOUT};
+
+/// NT x64 DISPATCHER_HEADER for notification and synchronization events.
+#[repr(C)]
+pub struct KernelEvent {
+    kind: u8,
+    control: u8,
+    size: u8,
+    reserved: u8,
+    pub(crate) signal: AtomicI32,
+    wait_list: purent_ntdef::list::ListEntry,
+}
+
+impl KernelEvent {
+    pub(crate) fn ticks() -> u64 {
+        unsafe { core::ptr::read_volatile(&raw const purent_hal::idt::TIMER_TICKS) }
+    }
+
+    pub fn is_signaled(&self) -> bool {
+        self.signal.load(Ordering::Acquire) > 0
+    }
+
+    fn acquire(&self) -> bool {
+        if self.kind == 0 {
+            self.is_signaled()
+        } else {
+            self.signal.compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire).is_ok()
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<KernelEvent>() == 24);
 
 #[no_mangle]
 pub unsafe extern "win64" fn KeInitializeEvent(
     event: *mut core::ffi::c_void,
-    _event_type: u32,
+    event_type: u32,
     initial_state: u8,
 ) {
+    let event = event.cast::<KernelEvent>();
     if !event.is_null() {
-        core::ptr::write_bytes(event as *mut u8, 0, 24);
-        let state_ptr = event as *mut u32;
-        *state_ptr = initial_state as u32;
+        let wait_list = &raw mut (*event).wait_list;
+        event.write(KernelEvent {
+            kind: event_type as u8,
+            control: 0,
+            size: 6,
+            reserved: 0,
+            signal: AtomicI32::new(i32::from(initial_state != 0)),
+            wait_list: purent_ntdef::list::ListEntry { flink: wait_list, blink: wait_list },
+        });
     }
 }
 
@@ -22,25 +62,41 @@ pub unsafe extern "win64" fn KeSetEvent(
     _increment: i32,
     _wait: u8,
 ) -> i32 {
-    if !event.is_null() {
-        let state_ptr = event as *mut u32;
-        let prev = *state_ptr;
-        *state_ptr = 1;
-        prev as i32
-    } else {
-        0
-    }
+    event.cast::<KernelEvent>().as_ref().map_or(0, |event| {
+        event.signal.swap(1, Ordering::Release)
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn KeWaitForSingleObject(
-    _object: *mut core::ffi::c_void,
+    object: *mut core::ffi::c_void,
     _wait_reason: u32,
     _wait_mode: i8,
     _alertable: u8,
-    _timeout: *mut i64,
+    timeout: *mut i64,
 ) -> NtStatus {
-    STATUS_SUCCESS
+    let Some(event) = object.cast::<KernelEvent>().as_ref() else {
+        return STATUS_INVALID_PARAMETER;
+    };
+    if event.kind > 1 || event.size != 6 {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    let duration = match timeout.as_ref().copied() {
+        None => None,
+        Some(value) if value <= 0 => Some(value.unsigned_abs().div_ceil(100_000)),
+        Some(_) => return STATUS_NOT_SUPPORTED,
+    };
+    let start = KernelEvent::ticks();
+    loop {
+        if event.acquire() {
+            return STATUS_SUCCESS;
+        }
+        if duration.is_some_and(|ticks| KernelEvent::ticks().wrapping_sub(start) >= ticks) {
+            return STATUS_TIMEOUT;
+        }
+        super::sched::wait_for_event_tick(event, start, duration);
+    }
 }
 
 #[no_mangle]

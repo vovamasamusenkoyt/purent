@@ -50,14 +50,40 @@ pub extern "win64" fn ki_system_call_dispatch(frame: &mut TrapFrame) {
 
     if matches!(syscall_nr, purent_ntdef::syscall::SYSCALL_PURENT_MAP_DLL | purent_ntdef::syscall::SYSCALL_PURENT_SEAL_IMAGE) {
         use purent_ntdef::syscall::SYSCALL_PURENT_MAP_DLL;
-        let status = match crate::ps::current_process_id() {
-            Some(win32k::CONSOLE_CLIENT_PID | crate::WINVER_PID) if syscall_nr == SYSCALL_PURENT_MAP_DLL => {
-                unsafe { crate::ps::ps_map_win32_module(a1 as usize) }
-            }
-            Some(win32k::CONSOLE_CLIENT_PID | crate::WINVER_PID) => unsafe { crate::ps::ps_seal_win32_image(a1) },
-            _ => purent_ntdef::status::STATUS_ACCESS_DENIED,
+        let allowed = crate::ps::current_process_id().is_some_and(|pid| {
+            pid == win32k::CONSOLE_CLIENT_PID || crate::ps::builtin::image_for_pid(pid).is_some()
+        });
+        let status = if !allowed {
+            purent_ntdef::status::STATUS_ACCESS_DENIED
+        } else if syscall_nr == SYSCALL_PURENT_MAP_DLL {
+            unsafe { crate::ps::ps_map_win32_module(a1 as usize) }
+        } else {
+            unsafe { crate::ps::ps_seal_win32_image(a1) }
         };
         frame.rax = status as u64;
+        return;
+    }
+
+    if (purent_ntdef::syscall::SYSCALL_PURENT_OPEN_BUILTIN..=purent_ntdef::syscall::SYSCALL_PURENT_CHILD_EXIT_CODE)
+        .contains(&syscall_nr)
+    {
+        use purent_ntdef::syscall::{
+            SYSCALL_PURENT_OPEN_BUILTIN, SYSCALL_PURENT_START_BUILTIN, SYSCALL_PURENT_WAIT_CHILD,
+            SYSCALL_PURENT_CLOSE_CHILD, SYSCALL_PURENT_CHILD_EXIT_CODE,
+        };
+        use crate::ps::builtin;
+        frame.rax = if crate::ps::current_process_id() != Some(win32k::CONSOLE_CLIENT_PID) {
+            purent_ntdef::status::STATUS_ACCESS_DENIED as u64
+        } else {
+            match syscall_nr {
+                SYSCALL_PURENT_OPEN_BUILTIN => builtin::image_size(a1 as usize) as u64,
+                SYSCALL_PURENT_START_BUILTIN => builtin::request(a1 as usize) as u64,
+                SYSCALL_PURENT_WAIT_CHILD => builtin::wait(a1 as usize, a2 as u32),
+                SYSCALL_PURENT_CLOSE_CHILD => builtin::close(a1 as usize) as u64,
+                SYSCALL_PURENT_CHILD_EXIT_CODE => builtin::exit_code(a1 as usize),
+                _ => STATUS_NOT_IMPLEMENTED as u64,
+            }
+        };
         return;
     }
 

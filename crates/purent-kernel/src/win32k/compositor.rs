@@ -10,7 +10,7 @@ use crate::mm::{
     NonPagedPool, PTE_NX, PTE_PRESENT, PTE_USER, PTE_WRITABLE,
 };
 
-use super::surface::{Rect, Surface};
+use super::{dialog, surface::{Rect, Surface}};
 
 const PAGE_SIZE: usize = 4096;
 const IDLE: u8 = 0;
@@ -21,7 +21,7 @@ static STATE: AtomicU8 = AtomicU8::new(IDLE);
 pub struct Compositor {
     job: usize,
     pub console: Surface,
-    pub dialog: Surface,
+    pub dialogs: [Surface; MAX_DIALOG_SURFACES],
 }
 
 pub unsafe fn allocate_page_aligned(bytes: usize) -> Option<(*mut u8, *mut core::ffi::c_void)> {
@@ -35,22 +35,31 @@ pub unsafe fn allocate_page_aligned(bytes: usize) -> Option<(*mut u8, *mut core:
 }
 
 impl Compositor {
-    pub unsafe fn prepare(frame: &Surface) -> Result<Self, NtStatus> {
+    pub unsafe fn prepare(frame: &Surface, window: Rect) -> Result<Self, NtStatus> {
         let size = frame.width as usize * frame.height as usize * 4;
         if size >= 0x1000_0000 {
             return Err(STATUS_INVALID_PARAMETER);
         }
-        let surface_bytes = size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
-        let (job, allocation) =
-            allocate_page_aligned(PAGE_SIZE + 2 * surface_bytes).ok_or(STATUS_NO_MEMORY)?;
+        let frame_bytes = size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        let rounded_size = |width: u32, height: u32| {
+            (width as usize * height as usize * 4).div_ceil(PAGE_SIZE) * PAGE_SIZE
+        };
+        let console_bytes = rounded_size(window.width, window.height);
+        let dialog_bytes = rounded_size(dialog::WIDTH, dialog::HEIGHT);
+        let (job, allocation) = allocate_page_aligned(
+            PAGE_SIZE + console_bytes + MAX_DIALOG_SURFACES * dialog_bytes,
+        ).ok_or(STATUS_NO_MEMORY)?;
         let console = job.add(PAGE_SIZE);
-        let dialog = console.add(surface_bytes);
-        let mappings = [
-            (JOB_ADDRESS, job, PAGE_SIZE, false),
-            (OUTPUT_ADDRESS, frame.buffer.cast(), surface_bytes, true),
-            (CONSOLE_ADDRESS, console, surface_bytes, false),
-            (DIALOG_ADDRESS, dialog, surface_bytes, false),
-        ];
+        let dialogs = console.add(console_bytes);
+        let mut mappings = [(0, job, 0, false); MAX_LAYERS + 2];
+        mappings[0] = (JOB_ADDRESS, job, PAGE_SIZE, false);
+        mappings[1] = (OUTPUT_ADDRESS, frame.buffer.cast(), frame_bytes, true);
+        mappings[2] = (surface_address(0), console, console_bytes, false);
+        for slot in 0..MAX_DIALOG_SURFACES {
+            mappings[slot + 3] = (
+                surface_address(slot + 1), dialogs.add(slot * dialog_bytes), dialog_bytes, false,
+            );
+        }
         let cr3 = purent_hal::cpu::read_cr3();
         for (index, &(alias, ptr, len, writable)) in mappings.iter().enumerate() {
             let flags = PTE_USER | PTE_PRESENT | PTE_NX | if writable { PTE_WRITABLE } else { 0 };
@@ -72,39 +81,64 @@ impl Compositor {
         }
         Ok(Self {
             job: job as usize,
-            console: Surface::from_raw(console.cast(), frame.width, frame.height, frame.width),
-            dialog: Surface::from_raw(dialog.cast(), frame.width, frame.height, frame.width),
+            console: Surface::from_raw(console.cast(), window.width, window.height, window.width),
+            dialogs: core::array::from_fn(|slot| {
+                Surface::from_raw(dialogs.add(slot * dialog_bytes).cast(),
+                    dialog::WIDTH, dialog::HEIGHT, dialog::WIDTH)
+            }),
         })
+    }
+
+    pub fn draw_dialog(&mut self, window: &dialog::Dialog, active: bool) {
+        let rect = Rect::new(0, 0, dialog::WIDTH, dialog::HEIGHT);
+        dialog::draw(&mut self.dialogs[window.slot], rect, &window.text, true, active);
     }
 
     pub fn compose(
         &mut self,
+        screen: Rect,
         area: Rect,
-        console: Option<Rect>,
-        console_opaque: Rect,
-        dialog: Option<Rect>,
+        console: Option<(Rect, Rect)>,
+        dialogs: &[Option<dialog::Dialog>; MAX_DIALOG_SURFACES],
     ) {
-        let screen = Rect::new(0, 0, self.console.width, self.console.height);
-        let clipped = |rect: Option<Rect>| {
-            rect.and_then(|rect| screen.intersect(&rect))
-                .map_or_else(PixelRect::default, |rect| PixelRect {
-                    left: rect.x as usize,
-                    top: rect.y as usize,
-                    right: rect.right() as usize,
-                    bottom: rect.bottom() as usize,
-                })
+        let clipped = |rect: Rect| {
+            screen.intersect(&rect).map_or_else(PixelRect::default, |rect| PixelRect {
+                left: rect.x as usize,
+                top: rect.y as usize,
+                right: rect.right() as usize,
+                bottom: rect.bottom() as usize,
+            })
         };
         if screen.intersect(&area).is_none() {
             return;
         }
-        let job = CompositionJob {
+        let mut job = CompositionJob {
             width: screen.width as usize,
             height: screen.height as usize,
-            dirty: clipped(Some(area)),
-            console: clipped(console),
-            console_opaque: clipped(Some(console_opaque)),
-            dialog: clipped(dialog),
+            dirty: clipped(area),
+            layer_count: 0,
+            layers: [WindowLayer::default(); MAX_LAYERS],
         };
+        let mut push = |rect: Rect, slot: usize, opaque: Option<Rect>| {
+            if screen.intersect(&rect).is_some() {
+                job.layers[job.layer_count] = WindowLayer {
+                    bounds: clipped(rect),
+                    opaque: opaque.map_or_else(PixelRect::default, clipped),
+                    origin_x: rect.x,
+                    origin_y: rect.y,
+                    stride: rect.width as usize,
+                    slot,
+                    glass: opaque.is_some(),
+                };
+                job.layer_count += 1;
+            }
+        };
+        if let Some((rect, opaque)) = console {
+            push(rect, 0, Some(opaque));
+        }
+        for window in dialogs.iter().flatten() {
+            push(window.rect, window.slot + 1, Some(dialog::client(window.rect)));
+        }
         unsafe { core::ptr::write(self.job as *mut CompositionJob, job) };
         STATE.store(REQUESTED, Ordering::Release);
         while STATE.load(Ordering::Acquire) != FINISHED {

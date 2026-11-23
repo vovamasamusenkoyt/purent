@@ -122,8 +122,24 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
 
     // 8. Load native binary drivers (null.sys and fs_rec.sys)
     kprintln!("\n--- [STAGE: LOADING NATIVE BINARY DRIVERS] ---");
-    let null_loaded = load_null_driver();
-    let fs_rec_loaded = load_fs_rec_driver();
+    // Keep the shared PE view in the immutable part of the loaded kernel.
+    let kernel_base = ldr.kernel_virtual_base as *const u8;
+    let headers = purent_pe::PeView::parse(core::slice::from_raw_parts(kernel_base, 4096))
+        .expect("mapped kernel PE headers");
+    let exports = headers.data_directory(purent_pe::IMAGE_DIRECTORY_ENTRY_EXPORT)
+        .expect("kernel PE exports");
+    let export_end = exports.virtual_address.checked_add(exports.size)
+        .expect("kernel export bounds") as usize;
+    assert!(export_end <= ldr.kernel_size as usize);
+    assert!(headers.section_headers().iter().all(|section| {
+        section.characteristics & 0x8000_0000 == 0
+            || section.virtual_address as usize >= export_end
+    }));
+    assert!(headers.image_base() == kernel_base as u64);
+    let kernel = purent_pe::PeView::parse(core::slice::from_raw_parts(kernel_base, export_end))
+        .expect("mapped kernel PE exports");
+    let null_loaded = load_null_driver(&kernel);
+    let fs_rec_loaded = load_fs_rec_driver(&kernel);
     if null_loaded && fs_rec_loaded {
         kprintln!("--- [STAGE COMPLETE: ALL NATIVE DRIVERS ACTIVE] ---\n");
     } else {
@@ -224,34 +240,19 @@ pub unsafe extern "win64" fn KiSystemStartup(loader_block: *const PureNtLoaderBl
     }
     ps::ps_create_user_process(CONHOST_EXE_BYTES, "conhost.exe", win32k::CONHOST_PID, 0x450000)
         .expect("conhost.exe");
-    let loader_entry = ps::ps_load_ntdll().expect("ntdll.dll");
+    let cr3 = purent_hal::cpu::read_cr3();
+    let loader_entry = ps::ps_load_ntdll(cr3).expect("ntdll.dll");
     let (_cmd_proc, cmd_thread) = ps::ps_create_win32_process(
-        CMD_EXE_BYTES, "cmd.exe", win32k::CONSOLE_CLIENT_PID, 0x550000, loader_entry,
+        CMD_EXE_BYTES, "cmd.exe", win32k::CONSOLE_CLIENT_PID, 0x550000, loader_entry, cr3,
     ).expect("cmd.exe");
-    let winver_thread = if WINVER_EXE_BYTES.is_empty() || WINVER_MUI_BYTES.is_empty() {
-        core::ptr::null_mut()
-    } else {
-        match ps::ps_map_user_shared_data().and_then(|()| {
-            ps::ps_create_win32_process(
-                WINVER_EXE_BYTES, "winver.exe", WINVER_PID, 0x1550000, loader_entry,
-            )
-        }) {
-            Ok((_, thread)) => thread,
-            Err(status) => {
-                kprintln!("[PS] winver.exe launch failed: 0x{:08X}", status);
-                core::ptr::null_mut()
-            }
-        }
-    };
     kprintln!("[PureNT] Entering interactive Win32k Desktop & Mouse event loop...");
-    win32k::win32k_run_event_loop(cmd_thread, winver_thread);
+    win32k::win32k_run_event_loop(cmd_thread);
 }
 
 static SMSS_EXE_BYTES: &[u8] = include_bytes!("../../../target/x86_64-pc-windows-msvc/debug/smss.exe");
 static DWM_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/dwm.exe");
 static CONHOST_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/conhost.exe");
 static CMD_EXE_BYTES: &[u8] = include_bytes!("../../../refs/win7_7601_x64/binaries/cmd.exe");
-const WINVER_PID: usize = 0x400;
 static WINVER_EXE_BYTES: &[u8] = include_bytes!("../../../target/esp/winver.exe");
 static WINVER_MUI_BYTES: &[u8] = include_bytes!("../../../target/esp/winver.exe.mui");
 

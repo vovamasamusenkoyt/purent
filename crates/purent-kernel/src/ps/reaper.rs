@@ -74,6 +74,12 @@ pub unsafe fn ps_terminate_current_thread(exit_status: u32) -> ! {
 
     let next = {
         let mut q = SCHED_QUEUE.lock();
+        if !(*curr).teb.is_null() {
+            let process = (*curr).process.cast::<Process>();
+            if let Some(process) = process.as_mut() {
+                process.exit_status = exit_status;
+            }
+        }
         (*curr).state = ThreadState::Terminated as u8;
         (*curr).header[4] = 1; // SignalState = 1 in DispatcherHeader (offset 0x04)
 
@@ -99,7 +105,7 @@ pub unsafe fn ps_terminate_current_thread(exit_status: u32) -> ! {
             q.current_index = 0;
         }
 
-        q.ready_threads[q.current_index]
+        q.select_after_termination()
     };
 
     let switch_count = CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;

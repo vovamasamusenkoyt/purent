@@ -97,14 +97,27 @@ pub unsafe extern "win64" fn IoDeleteSymbolicLink(_symbolic_link_name: *mut Unic
 
 #[no_mangle]
 pub unsafe extern "win64" fn IofCompleteRequest(irp: *mut Irp, priority_boost: i8) {
-    if !irp.is_null() {
-        kprintln!(
-            "[IO] IofCompleteRequest: IRP 0x{:016X} completed (Status: 0x{:08X}, Info: {}, Boost: {})",
-            irp as usize,
-            (*irp).io_status.status,
-            (*irp).io_status.information,
-            priority_boost
-        );
+    if irp.is_null() {
+        return;
+    }
+    let status = (*irp).io_status;
+    let iosb = (*irp).user_iosb.cast::<purent_ntdef::io::IoStatusBlock>();
+    let event = (*irp).user_event;
+    let manager_owned = (*irp).flags & super::irp::IRP_SYNCHRONOUS_API != 0;
+    if !iosb.is_null() {
+        iosb.write(status);
+    }
+    kprintln!(
+        "[IO] IofCompleteRequest: IRP 0x{:016X} completed (Status: 0x{:08X}, Info: {}, Boost: {})",
+        irp as usize, status.status, status.information, priority_boost
+    );
+    if manager_owned {
+        super::irp::IoFreeIrp(irp);
+    }
+    // Publish the IOSB after the last access to the IRP. A woken caller may
+    // immediately release its packet or leave the stack holding the event.
+    if !event.is_null() {
+        crate::ke::KeSetEvent(event, 0, 0);
     }
 }
 

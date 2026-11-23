@@ -129,6 +129,7 @@ impl Keyboard {
                 return match key {
                     0x01 => Some(27),
                     0x0E => Some(8),
+                    0x0F => Some(b'\t'),
                     0x1C => Some(b'\r'),
                     0x39 => Some(b' '),
                     0x02..=0x0D => Some(

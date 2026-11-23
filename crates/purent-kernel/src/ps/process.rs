@@ -11,6 +11,7 @@ pub struct Process {
     pub section_base_address: usize,       // +0x270 (Image Base in Win7 _EPROCESS)
     pub image_file_name: [u8; 16],         // +0x2E0 (Image Name in Win7 _EPROCESS)
     pub peb: *mut Peb,                     // +0x338 (PEB pointer in Win7 _EPROCESS)
+    pub exit_status: u32,
 }
 
 #[repr(C)]

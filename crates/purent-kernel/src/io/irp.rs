@@ -3,10 +3,16 @@
 use purent_ntdef::io::{DeviceObject, IoStackLocation, IoStatusBlock, Irp, IRP_MJ_DEVICE_CONTROL};
 use crate::mm::{ExAllocatePoolWithTag, ExFreePoolWithTag, NonPagedPool};
 
+// Requests built by the synchronous I/O builders belong to the I/O manager.
+pub(super) const IRP_SYNCHRONOUS_API: u32 = 0x4;
+
 pub const IRP_TAG: u32 = 0x20707249; // 'Irp '
 
 #[no_mangle]
 pub unsafe extern "win64" fn IoAllocateIrp(stack_size: i8, _charge_quota: u8) -> *mut Irp {
+    if !(1..i8::MAX).contains(&stack_size) {
+        return core::ptr::null_mut();
+    }
     let irp_base_size = core::mem::size_of::<Irp>();
     let stack_location_size = core::mem::size_of::<IoStackLocation>();
     let total_size = irp_base_size + (stack_size as usize) * stack_location_size;
@@ -63,8 +69,8 @@ pub unsafe extern "win64" fn IoBuildDeviceIoControlRequest(
     output_buffer: *mut core::ffi::c_void,
     output_buffer_length: u32,
     _internal_device_io_control: u8,
-    _event: *mut core::ffi::c_void,
-    _io_status_block: *mut IoStatusBlock,
+    event: *mut core::ffi::c_void,
+    io_status_block: *mut IoStatusBlock,
 ) -> *mut Irp {
     let stack_size = if !device_object.is_null() {
         (*device_object).stack_size.max(1)
@@ -73,6 +79,9 @@ pub unsafe extern "win64" fn IoBuildDeviceIoControlRequest(
     };
     let irp = IoAllocateIrp(stack_size, 0);
     if !irp.is_null() {
+        (*irp).flags |= IRP_SYNCHRONOUS_API;
+        (*irp).user_event = event;
+        (*irp).user_iosb = io_status_block.cast();
         (*irp).user_buffer = output_buffer;
         let stack = io_get_next_irp_stack_location(irp);
         (*stack).major_function = IRP_MJ_DEVICE_CONTROL;
@@ -91,8 +100,8 @@ pub unsafe extern "win64" fn IoBuildSynchronousFsdRequest(
     buffer: *mut core::ffi::c_void,
     length: u32,
     _starting_offset: *mut i64,
-    _event: *mut core::ffi::c_void,
-    _io_status_block: *mut IoStatusBlock,
+    event: *mut core::ffi::c_void,
+    io_status_block: *mut IoStatusBlock,
 ) -> *mut Irp {
     let stack_size = if !device_object.is_null() {
         (*device_object).stack_size.max(1)
@@ -101,6 +110,9 @@ pub unsafe extern "win64" fn IoBuildSynchronousFsdRequest(
     };
     let irp = IoAllocateIrp(stack_size, 0);
     if !irp.is_null() {
+        (*irp).flags |= IRP_SYNCHRONOUS_API;
+        (*irp).user_event = event;
+        (*irp).user_iosb = io_status_block.cast();
         (*irp).user_buffer = buffer;
         let stack = io_get_next_irp_stack_location(irp);
         (*stack).major_function = major_function as u8;

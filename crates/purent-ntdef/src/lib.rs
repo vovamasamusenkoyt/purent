@@ -12,6 +12,7 @@ pub mod string;
 pub mod syscall;
 pub mod dialog;
 pub mod composition;
+pub mod builtin_exec;
 
 pub use io::*;
 pub use kpcr::*;

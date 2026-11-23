@@ -215,8 +215,18 @@ pub unsafe extern "win64" fn KiSwapContext(
         "mov rsi, rdx",
         "mov rbx, gs:[0x20]",
 
-        // 5. Swap Stacks:
+        // 5. Save the outgoing stack and switch to the incoming address space.
         "mov [rdi + 0x38], rsp",
+        // Switch page tables before accessing the incoming stack. The boot
+        // thread still uses the low identity-mapped UEFI stack.
+        "mov rax, [rsi + 0x70]",
+        "cmp rax, [rdi + 0x70]",
+        "je 2f",
+        "test rax, rax",
+        "jz 2f",
+        "mov rdx, [rax + 0x28]",
+        "mov cr3, rdx",
+        "2:",
         "mov rsp, [rsi + 0x38]",
 
         // 6. Update Prcb.CurrentThread (gs:[0x188]) to NextThread
@@ -237,20 +247,9 @@ pub unsafe extern "win64" fn KiSwapContext(
         "pop rdi",
         "pop rsi",
 
-        // 8. Update thread states: CurrentThread = Ready (1), NextThread = Running (2)
-        "mov byte ptr [rdi + 0x49], 1",
+        // 8. Mark the incoming thread Running; the scheduler owns the outgoing state.
         "mov byte ptr [rsi + 0x49], 2",
         "inc dword ptr [rsi + 0x138]",
-
-        // 9. Check if CR3 needs reloading (NextThread->Process vs CurrentThread->Process)
-        "mov rax, [rsi + 0x70]",
-        "cmp rax, [rdi + 0x70]",
-        "je 2f",
-        "test rax, rax",
-        "jz 2f",
-        "mov rdx, [rax + 0x28]",
-        "mov cr3, rdx",
-        "2:",
 
         // 10. Update IA32_KERNEL_GS_BASE if NextThread has a TEB (offset 0xB8)
         "mov r8, [rsi + 0x0B8]",

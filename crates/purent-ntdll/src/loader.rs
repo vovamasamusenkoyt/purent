@@ -37,8 +37,7 @@ struct LoaderData {
 
 const _: () = assert!(LOADER_DATA_OFFSET + size_of::<LoaderData>() <= 4096);
 
-// The compatibility processes still share their DLL mappings. Bind each shared
-// IAT once, while publishing separate Windows-style loader lists in their PEBs.
+// Bind each DLL IAT once per address space. Loader lists belong to each PEB.
 static LOCKED: AtomicBool = AtomicBool::new(false);
 static mut READY: usize = 0;
 static mut DEPENDENCIES: [usize; MODULE_COUNT] = [0; MODULE_COUNT];

@@ -4,6 +4,7 @@ pub type NtStatus = i32;
 
 pub const STATUS_SUCCESS: NtStatus = 0x00000000;
 pub const STATUS_WAIT_0: NtStatus = 0x00000000;
+pub const STATUS_TIMEOUT: NtStatus = 0x00000102;
 pub const STATUS_PENDING: NtStatus = 0x00000103;
 
 pub const STATUS_UNSUCCESSFUL: NtStatus = -1073741823; // 0xC0000001

@@ -31,7 +31,8 @@ unsafe fn compose(job: &CompositionJob) {
         while x < job.dirty.right {
             let mut right = job.dirty.right;
             let mut source = None;
-            for (rect, address) in [(job.dialog, DIALOG_ADDRESS), (job.console, CONSOLE_ADDRESS)] {
+            for layer in job.layers[..job.layer_count].iter().rev() {
+                let rect = layer.bounds;
                 if y < rect.top || y >= rect.bottom || x >= rect.right {
                     continue;
                 }
@@ -39,16 +40,19 @@ unsafe fn compose(job: &CompositionJob) {
                     right = right.min(rect.left);
                 } else {
                     right = right.min(rect.right);
-                    source = Some(address as *const u32);
+                    source = Some(layer);
                     break;
                 }
             }
-            if let Some(source) = source {
-                let opaque = job.console_opaque;
-                let console = source == CONSOLE_ADDRESS as *const u32;
+            if let Some(layer) = source {
+                let opaque = layer.opaque;
                 let content_row = y >= opaque.top && y < opaque.bottom;
-                let glass = console && (!content_row || x < opaque.left || x >= opaque.right);
-                if console && content_row {
+                let glass = layer.glass && (!content_row || x < opaque.left || x >= opaque.right);
+                let source_row = (y as i32 - layer.origin_y) as usize * layer.stride;
+                let source_left = (x as i32 - layer.origin_x) as usize;
+                let source = (surface_address(layer.slot) as *const u32)
+                    .add(source_row + source_left);
+                if layer.glass && content_row {
                     if x < opaque.left {
                         right = right.min(opaque.left);
                     } else if x < opaque.right {
@@ -57,18 +61,18 @@ unsafe fn compose(job: &CompositionJob) {
                 }
 
                 if glass {
-                    for x in x..right {
-                        let pixel = *source.add(row + x);
-                        *output.add(row + x) = if pixel == GLASS_PIXEL {
-                            glass_pixel(x, y, job.width, job.height)
-                        } else {
+                    for (offset, x) in (x..right).enumerate() {
+                        let pixel = *source.add(offset);
+                        *output.add(row + x) = if pixel >> 24 == 255 {
                             pixel
+                        } else {
+                            blend_over(pixel, glass_pixel(x, y, job.width, job.height))
                         };
                     }
                 } else {
                     core::arch::asm!(
                         "rep movsd",
-                        inout("rsi") source.add(row + x) => _,
+                        inout("rsi") source => _,
                         inout("rdi") output.add(row + x) => _,
                         inout("rcx") right - x => _,
                         options(nostack, preserves_flags),

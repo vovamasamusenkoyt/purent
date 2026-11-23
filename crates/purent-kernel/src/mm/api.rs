@@ -8,8 +8,8 @@ use purent_ntdef::status::{
 
 use super::pmm::{PMM, PAGE_SIZE};
 use super::vmm::{
-    phys_to_virt, protect_to_pte_flags, pte_flags_to_protect, vmm_map_user_page,
-    vmm_protect_user_page, vmm_query_user_page, vmm_unmap_user_page,
+    phys_to_virt, protect_to_pte_flags, pte_flags_to_protect, vmm_map_owned_user_page,
+    vmm_protect_user_page, vmm_query_user_page, vmm_unmap_owned_user_page,
 };
 
 pub static USER_VIRTUAL_BUMP: AtomicUsize = AtomicUsize::new(0x00000000_20000000);
@@ -62,7 +62,7 @@ pub unsafe extern "win64" fn ZwAllocateVirtualMemory(
             };
             core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, PAGE_SIZE);
 
-            if let Err(status) = vmm_map_user_page(cr3, page_va, frame, pte_flags) {
+            if let Err(status) = vmm_map_owned_user_page(cr3, page_va, frame, pte_flags) {
                 PMM.lock().free_frame(frame);
                 return status;
             }
@@ -101,7 +101,7 @@ pub unsafe extern "win64" fn ZwFreeVirtualMemory(
     let mut freed_count = 0usize;
     for i in 0..num_pages {
         let page_va = start_va + (i as u64) * (PAGE_SIZE as u64);
-        if let Some(frame) = vmm_unmap_user_page(cr3, page_va) {
+        if let Some(frame) = vmm_unmap_owned_user_page(cr3, page_va) {
             PMM.lock().free_frame(frame);
             freed_count += 1;
         }

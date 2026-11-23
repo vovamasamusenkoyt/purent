@@ -8,15 +8,15 @@ use purent_ntdef::{
     },
     object::{AccessMask, ObjectAttributes, GENERIC_READ, GENERIC_WRITE},
     status::{
-        NtStatus, STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER,
+        NtStatus, STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_PARAMETER,
         STATUS_NO_MEMORY, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
     },
 };
 
-use crate::io::{io_get_next_irp_stack_location, IoAllocateIrp, IoCallDriver, IoFreeIrp};
+use crate::io::{io_call_driver_sync, io_get_next_irp_stack_location, IoAllocateIrp};
 use crate::mm::{ExAllocatePoolWithTag, ExFreePoolWithTag, NonPagedPool};
 use crate::ob::{
-    ob_close_handle, ob_create_handle, ob_insert_file, ob_reference_object_by_handle,
+    ob_create_handle, ob_insert_file, ob_reference_file_for_io, ob_remove_handle,
     ob_reference_object_by_name, OB_TYPE_FILE,
 };
 
@@ -85,31 +85,28 @@ pub unsafe extern "win64" fn ZwCreateFile(
     (*file_obj).read_access = if (desired_access & GENERIC_READ) != 0 { 1 } else { 0 };
     (*file_obj).write_access = if (desired_access & GENERIC_WRITE) != 0 { 1 } else { 0 };
 
-    // 3. Register FileObject in Object Manager and assign handle
-    let file_header = ob_insert_file(file_obj as *mut u8, path);
+    // Dispatch CREATE before publishing a handle to the caller.
+    let irp = IoAllocateIrp((*dev_obj).stack_size.max(1), 0);
+    if irp.is_null() {
+        ExFreePoolWithTag(file_obj.cast(), FILE_TAG);
+        return STATUS_NO_MEMORY;
+    }
+    let stack = io_get_next_irp_stack_location(irp);
+    (*stack).major_function = IRP_MJ_CREATE;
+    (*stack).file_object = file_obj.cast();
+    (*stack).device_object = dev_obj;
+
+    let result = io_call_driver_sync(dev_obj, irp);
+    io_status_block.write(result);
+    if !purent_ntdef::status::nt_success(result.status) {
+        ExFreePoolWithTag(file_obj.cast(), FILE_TAG);
+        return result.status;
+    }
+    let file_header = ob_insert_file(file_obj.cast(), path);
     let handle = ob_create_handle(file_header, desired_access);
     *file_handle = handle;
-
-    // 4. Build and dispatch IRP_MJ_CREATE to the device
-    let stack_size = (*dev_obj).stack_size.max(1);
-    let irp = IoAllocateIrp(stack_size, 0);
-    if !irp.is_null() {
-        let stack = io_get_next_irp_stack_location(irp);
-        (*stack).major_function = IRP_MJ_CREATE;
-        (*stack).file_object = file_obj as *mut core::ffi::c_void;
-        (*stack).device_object = dev_obj;
-
-        let status = IoCallDriver(dev_obj, irp);
-        (*io_status_block).status = status;
-        (*io_status_block).information = 1; // FILE_OPENED
-        kprintln!("[ZW] ZwCreateFile dispatched IRP_MJ_CREATE: HANDLE 0x{:X}, Status: 0x{:08X}", handle, status);
-        IoFreeIrp(irp);
-        return status;
-    }
-
-    (*io_status_block).status = STATUS_SUCCESS;
-    (*io_status_block).information = 1;
-    STATUS_SUCCESS
+    kprintln!("[ZW] ZwCreateFile dispatched IRP_MJ_CREATE: HANDLE 0x{:X}, Status: 0x{:08X}", handle, result.status);
+    result.status
 }
 
 #[no_mangle]
@@ -128,9 +125,14 @@ pub unsafe extern "win64" fn ZwWriteFile(
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Special handling for Console / Stdout (Handle 1, 4)
-    if file_handle == 1 || file_handle == 4 {
-        let slice = core::slice::from_raw_parts(buffer as *const u8, length as usize);
+    let resolved = ob_reference_file_for_io(file_handle);
+    // A live file handle takes precedence over the console fallback.
+    if file_handle == 1 || (file_handle == 4 && resolved.is_err()) {
+        let slice = if length == 0 {
+            &[]
+        } else {
+            core::slice::from_raw_parts(buffer.cast::<u8>(), length as usize)
+        };
         if crate::ps::current_process_id() == Some(crate::win32k::CONSOLE_CLIENT_PID) {
             crate::win32k::console_client_write(slice);
         } else if let Ok(s) = core::str::from_utf8(slice) {
@@ -150,15 +152,11 @@ pub unsafe extern "win64" fn ZwWriteFile(
         return STATUS_SUCCESS;
     }
 
-    let header = match ob_reference_object_by_handle(file_handle) {
-        Ok(h) => h,
+    let file = match resolved {
+        Ok(file) => file,
         Err(status) => return status,
     };
-
-    let file_obj = (*header).body as *mut FileObject;
-    if file_obj.is_null() {
-        return STATUS_INVALID_HANDLE;
-    }
+    let file_obj = file.file;
 
     let dev_obj = (*file_obj).device_object;
     if dev_obj.is_null() {
@@ -184,11 +182,9 @@ pub unsafe extern "win64" fn ZwWriteFile(
         dev_obj as usize,
         length
     );
-    let status = IoCallDriver(dev_obj, irp);
-    (*io_status_block).status = status;
-    (*io_status_block).information = (*irp).io_status.information;
-    IoFreeIrp(irp);
-    status
+    let result = io_call_driver_sync(dev_obj, irp);
+    io_status_block.write(result);
+    result.status
 }
 
 #[no_mangle]
@@ -207,15 +203,11 @@ pub unsafe extern "win64" fn ZwReadFile(
         return STATUS_INVALID_PARAMETER;
     }
 
-    let header = match ob_reference_object_by_handle(file_handle) {
-        Ok(h) => h,
+    let file = match ob_reference_file_for_io(file_handle) {
+        Ok(file) => file,
         Err(status) => return status,
     };
-
-    let file_obj = (*header).body as *mut FileObject;
-    if file_obj.is_null() {
-        return STATUS_INVALID_HANDLE;
-    }
+    let file_obj = file.file;
 
     let dev_obj = (*file_obj).device_object;
     if dev_obj.is_null() {
@@ -235,16 +227,15 @@ pub unsafe extern "win64" fn ZwReadFile(
     (*stack).file_object = file_obj as *mut core::ffi::c_void;
     (*stack).parameters[0] = length as usize;
 
-    let status = IoCallDriver(dev_obj, irp);
-    (*io_status_block).status = status;
-    IoFreeIrp(irp);
-    status
+    let result = io_call_driver_sync(dev_obj, irp);
+    io_status_block.write(result);
+    result.status
 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn ZwClose(handle: usize) -> NtStatus {
     kprintln!("[ZW] ZwClose: closing HANDLE 0x{:X}", handle);
-    let header = match ob_reference_object_by_handle(handle) {
+    let header = match ob_remove_handle(handle) {
         Ok(h) => h,
         Err(status) => return status,
     };
@@ -263,8 +254,7 @@ pub unsafe extern "win64" fn ZwClose(handle: usize) -> NtStatus {
                     (*stack).major_function = IRP_MJ_CLEANUP;
                     (*stack).device_object = dev_obj;
                     (*stack).file_object = file_obj as *mut core::ffi::c_void;
-                    IoCallDriver(dev_obj, cleanup_irp);
-                    IoFreeIrp(cleanup_irp);
+                    io_call_driver_sync(dev_obj, cleanup_irp);
                 }
 
                 // 2. Dispatch IRP_MJ_CLOSE
@@ -274,13 +264,12 @@ pub unsafe extern "win64" fn ZwClose(handle: usize) -> NtStatus {
                     (*stack).major_function = IRP_MJ_CLOSE;
                     (*stack).device_object = dev_obj;
                     (*stack).file_object = file_obj as *mut core::ffi::c_void;
-                    IoCallDriver(dev_obj, close_irp);
-                    IoFreeIrp(close_irp);
+                    io_call_driver_sync(dev_obj, close_irp);
                 }
             }
             ExFreePoolWithTag(file_obj as *mut core::ffi::c_void, FILE_TAG);
         }
     }
 
-    ob_close_handle(handle)
+    STATUS_SUCCESS
 }

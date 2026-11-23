@@ -114,10 +114,6 @@ pub unsafe extern "C" fn generic_exception_handler(vector: u64, error_code: u64,
 #[no_mangle]
 pub unsafe extern "C" fn apic_timer_handler() {
     core::ptr::write_volatile(&raw mut TIMER_TICKS, core::ptr::read_volatile(&raw const TIMER_TICKS) + 1);
-    let ticks = core::ptr::read_volatile(&raw const TIMER_TICKS);
-    if ticks <= 5 || ticks % 100 == 0 {
-        kprintln!("[TIMER] Quantum Tick: {} (APIC interrupt)", ticks);
-    }
     // Send EOI (End of Interrupt) to Local APIC at 0xFEE000B0
     let eoi_reg = 0xFEE000B0 as *mut u32;
     core::ptr::write_volatile(eoi_reg, 0);

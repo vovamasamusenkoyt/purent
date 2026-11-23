@@ -1,6 +1,7 @@
 //! NT Process & Thread Management (Ps) Subsystem
 
 pub mod process;
+pub mod builtin;
 pub mod loader;
 pub mod reaper;
 

@@ -27,6 +27,8 @@ pub const PTE_ACCESSED: u64 = 1 << 5;
 pub const PTE_DIRTY: u64 = 1 << 6;
 pub const PTE_HUGE: u64 = 1 << 7;
 pub const PTE_GLOBAL: u64 = 1 << 8;
+// Software bit marking a leaf frame owned by its address space.
+pub const PTE_OWNED: u64 = 1 << 9;
 pub const PTE_NX: u64 = 1u64 << 63;
 
 pub static VMM_LOCK: purent_hal::SpinLock<()> = purent_hal::SpinLock::new(());
@@ -71,6 +73,10 @@ pub fn pte_flags_to_protect(flags: u64) -> u32 {
             purent_ntdef::mem::PAGE_READONLY
         }
     }
+}
+
+pub unsafe fn vmm_map_owned_user_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Result<(), NtStatus> {
+    vmm_map_user_page(cr3, va, pa, flags | PTE_OWNED)
 }
 
 /// Map a 4KB virtual page to a physical frame, on-demand splitting 1GB and 2MB huge pages
@@ -155,6 +161,14 @@ pub unsafe fn vmm_map_user_page(cr3: u64, va: u64, pa: u64, flags: u64) -> Resul
 
 /// Unmap a 4KB virtual page, returning its physical frame address if it was mapped
 pub unsafe fn vmm_unmap_user_page(cr3: u64, va: u64) -> Option<u64> {
+    unmap_user_page(cr3, va, PTE_PRESENT | PTE_OWNED)
+}
+
+pub unsafe fn vmm_unmap_owned_user_page(cr3: u64, va: u64) -> Option<u64> {
+    unmap_user_page(cr3, va, PTE_OWNED)
+}
+
+unsafe fn unmap_user_page(cr3: u64, va: u64, mapping_bits: u64) -> Option<u64> {
     if va >= 0x00008000_00000000 {
         return None;
     }
@@ -187,7 +201,7 @@ pub unsafe fn vmm_unmap_user_page(cr3: u64, va: u64) -> Option<u64> {
     let pt_phys = pd_entry & 0x000F_FFFF_FFFF_F000;
     let pt = phys_to_virt::<u64>(pt_phys);
     let pt_entry = *pt.add(pt_idx);
-    if (pt_entry & PTE_PRESENT) == 0 {
+    if pt_entry & mapping_bits == 0 {
         return None;
     }
     *pt.add(pt_idx) = 0;
@@ -259,7 +273,7 @@ pub unsafe fn vmm_protect_user_page(cr3: u64, va: u64, new_flags: u64) -> Result
         return Err(STATUS_UNSUCCESSFUL);
     }
     let pa = old_entry & 0x000F_FFFF_FFFF_F000;
-    *pt.add(pt_idx) = pa | new_flags;
+    *pt.add(pt_idx) = pa | new_flags | (old_entry & PTE_OWNED);
     purent_hal::cpu::invlpg(va);
     Ok(old_entry)
 }
@@ -310,4 +324,46 @@ pub unsafe fn vmm_query_user_page(cr3: u64, va: u64) -> Option<(u64, u64)> {
         return None;
     }
     Some((pt_entry & 0x000F_FFFF_FFFF_F000, pt_entry & !0x000F_FFFF_FFFF_F000))
+}
+
+/// Inherit the supervisor high half and start with empty user mappings.
+pub unsafe fn create_user_address_space() -> Result<u64, NtStatus> {
+    let root = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
+    let dst = phys_to_virt::<u64>(root);
+    let src = phys_to_virt::<u64>(purent_hal::cpu::read_cr3() & PAGE_ADDRESS);
+    core::ptr::write_bytes(dst, 0, 256);
+    core::ptr::copy_nonoverlapping(src.add(256), dst.add(256), 256);
+    // Timer EOI still uses the identity-mapped local APIC MMIO address.
+    let apic = purent_hal::apic::APIC_BASE as u64;
+    if let Err(status) = vmm_map_user_page(
+        root, apic, apic, PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_NX,
+    ) {
+        destroy_user_address_space(root);
+        return Err(status);
+    }
+    Ok(root)
+}
+
+const PAGE_ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
+
+/// Release a private root after its last thread has stopped running.
+pub unsafe fn destroy_user_address_space(root: u64) {
+    debug_assert_ne!(root, purent_hal::cpu::read_cr3() & PAGE_ADDRESS);
+    unsafe fn release(frame: u64, depth: usize) {
+        let table = core::slice::from_raw_parts(
+            phys_to_virt::<u64>(frame),
+            if depth == 4 { 256 } else { 512 },
+        );
+        for &entry in table {
+            let child = entry & PAGE_ADDRESS;
+            if depth > 1 && entry & PTE_PRESENT != 0 {
+                release(child, depth - 1);
+            } else if depth == 1 && entry & PTE_OWNED != 0 {
+                PMM.lock().free_frame(child);
+            }
+        }
+        PMM.lock().free_frame(frame);
+    }
+
+    release(root, 4);
 }

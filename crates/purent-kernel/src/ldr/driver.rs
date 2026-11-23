@@ -7,51 +7,10 @@ use purent_ntdef::{
     status::{nt_success, NtStatus},
     string::UnicodeString,
 };
-use purent_pe::{PeView, IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_REL_BASED_DIR64};
-
-use crate::io::{
-    IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
+use purent_pe::{
+    ImageImportDescriptor, NamedExport, PeView, IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_IMPORT,
+    IMAGE_REL_BASED_DIR64,
 };
-use crate::mm::{ExAllocatePoolWithTag, ExFreePoolWithTag};
-use crate::zw::{ZwClose, ZwCreateFile, ZwLoadDriver};
-
-// Kernel routines resolved in IAT
-extern "win64" {
-    fn RtlInitUnicodeString(destination_string: *mut UnicodeString, source_string: *const u16);
-    fn IoDeleteDevice(device_object: *mut purent_ntdef::io::DeviceObject);
-    fn MmPageEntireDriver(address: *mut core::ffi::c_void);
-    fn IofCompleteRequest(irp: *mut purent_ntdef::io::Irp, priority_boost: i8);
-    fn IoCreateDevice(
-        driver_object: *mut DriverObject,
-        device_extension_size: u32,
-        device_name: *mut UnicodeString,
-        device_type: u32,
-        device_characteristics: u32,
-        exclusive: u8,
-        device_object: *mut *mut purent_ntdef::io::DeviceObject,
-    ) -> NtStatus;
-    fn KeBugCheckEx(
-        bug_check_code: u32,
-        bug_check_parameter1: usize,
-        bug_check_parameter2: usize,
-        bug_check_parameter3: usize,
-        bug_check_parameter4: usize,
-    ) -> !;
-    fn IoDeleteSymbolicLink(symbolic_link_name: *mut UnicodeString) -> NtStatus;
-    fn IoUnregisterFileSystem(device_object: *mut purent_ntdef::io::DeviceObject);
-    fn IoRegisterFileSystem(device_object: *mut purent_ntdef::io::DeviceObject);
-    fn KeLeaveCriticalRegion();
-    fn KeEnterCriticalRegion();
-    fn KeSetEvent(event: *mut core::ffi::c_void, increment: i32, wait: u8) -> i32;
-    fn KeInitializeEvent(event: *mut core::ffi::c_void, r#type: u32, state: u8);
-    fn KeWaitForSingleObject(
-        object: *mut core::ffi::c_void,
-        wait_reason: u32,
-        wait_mode: i8,
-        alertable: u8,
-        timeout: *mut i64,
-    ) -> NtStatus;
-}
 
 static NULL_SYS_IMAGE: &[u8] = include_bytes!("../../../../refs/win7_7601_x64/binaries/null.sys");
 static FS_REC_SYS_IMAGE: &[u8] = include_bytes!("../../../../refs/win7_7601_x64/binaries/fs_rec.sys");
@@ -109,6 +68,9 @@ unsafe fn map_pe_driver(image: &[u8], driver_base: usize, driver_name: &str) -> 
     };
 
     let image_size = pe.size_of_image() as usize;
+    if image_size > core::mem::size_of::<DriverMemory>() {
+        return None;
+    }
     let original_image_base = pe.image_base();
     kprintln!("[LOADER] Driver {} allocated at 0x{:016X} (size: {} KiB)", driver_name, driver_base, image_size / 1024);
 
@@ -125,7 +87,10 @@ unsafe fn map_pe_driver(image: &[u8], driver_base: usize, driver_name: &str) -> 
         let raw_size = sec.size_of_raw_data as usize;
         let virt_addr = sec.virtual_address as usize;
 
-        if raw_size > 0 && raw_offset + raw_size <= image.len() {
+        if raw_size > 0 {
+            if raw_offset + raw_size > image.len() || virt_addr + raw_size > image_size {
+                return None;
+            }
             let src = &image[raw_offset..raw_offset + raw_size];
             let dst = (driver_base + virt_addr) as *mut u8;
             core::ptr::copy_nonoverlapping(src.as_ptr(), dst, raw_size);
@@ -178,23 +143,92 @@ unsafe fn map_pe_driver(image: &[u8], driver_base: usize, driver_name: &str) -> 
     Some((image_size, pe.entry_point_rva() as usize))
 }
 
-pub unsafe fn load_null_driver() -> bool {
+/// Bind imports from the on-disk lookup table into the mapped driver's IAT.
+/// Only imports by name from the running kernel are supported for now.
+unsafe fn bind_kernel_imports(
+    image: &[u8],
+    driver_base: usize,
+    kernel: &PeView<'_>,
+) -> Option<usize> {
+    let driver = PeView::parse(image).ok()?;
+    let Some(directory) = driver.data_directory(IMAGE_DIRECTORY_ENTRY_IMPORT) else {
+        return Some(0);
+    };
+    let directory_rva = directory.virtual_address;
+    if directory_rva == 0 {
+        return Some(0);
+    }
+    let bytes_at = |rva: u32, len: usize| {
+        let offset = driver.rva_to_offset(rva)?;
+        image.get(offset..offset.checked_add(len)?)
+    };
+    let name_at = |rva: u32| {
+        let bytes = image.get(driver.rva_to_offset(rva)?..)?;
+        Some(&bytes[..bytes.iter().position(|&byte| byte == 0)?])
+    };
+
+    let mut count = 0;
+    let descriptor_size = core::mem::size_of::<ImageImportDescriptor>();
+    for offset in (0..directory.size).step_by(descriptor_size) {
+        if directory.size - offset < descriptor_size as u32 {
+            break;
+        }
+        let entry = bytes_at(directory_rva.checked_add(offset)?, descriptor_size)?;
+        if entry.iter().all(|&byte| byte == 0) {
+            return Some(count);
+        }
+        let descriptor = core::ptr::read_unaligned(entry.as_ptr().cast::<ImageImportDescriptor>());
+        let module = name_at(descriptor.name)?;
+        if !module.eq_ignore_ascii_case(b"ntoskrnl.exe")
+            && !module.eq_ignore_ascii_case(b"purentoskrnl.exe")
+        {
+            kprintln!("[LOADER] Unsupported import module: {:?}", core::str::from_utf8(module));
+            return None;
+        }
+        let iat = descriptor.first_thunk;
+        if iat == 0 {
+            return None;
+        }
+        let lookup = match descriptor.original_first_thunk {
+            0 => iat,
+            rva => rva,
+        };
+        let mut offset = 0;
+        loop {
+            let thunk = u64::from_le_bytes(bytes_at(lookup.checked_add(offset)?, 8)?.try_into().ok()?);
+            if thunk == 0 {
+                break;
+            }
+            let name = name_at(u32::try_from(thunk).ok()?.checked_add(2)?)?;
+            let Some(NamedExport::Address(rva)) = kernel.named_export(name, true) else {
+                kprintln!("[LOADER] Unresolved kernel import: {:?}", core::str::from_utf8(name));
+                return None;
+            };
+            let slot = iat.checked_add(offset)?;
+            if slot.checked_add(8)? > driver.size_of_image() {
+                return None;
+            }
+            let target = kernel.image_base().checked_add(u64::from(rva))?;
+            core::ptr::write_unaligned((driver_base + slot as usize) as *mut u64, target);
+            offset = offset.checked_add(8)?;
+            count += 1;
+        }
+    }
+    None
+}
+
+pub unsafe fn load_null_driver(kernel: &PeView<'_>) -> bool {
     let driver_base = &raw mut NULL_DRIVER_POOL as usize;
     let (image_size, entry_rva) = match map_pe_driver(NULL_SYS_IMAGE, driver_base, "null.sys") {
         Some(v) => v,
         None => return false,
     };
 
-    // Bind IAT (RVA 0x2000, 7 exports)
-    let iat = (driver_base + 0x2000) as *mut usize;
-    *iat.add(0) = RtlInitUnicodeString as *const () as usize;
-    *iat.add(1) = IoDeleteDevice as *const () as usize;
-    *iat.add(2) = MmPageEntireDriver as *const () as usize;
-    *iat.add(3) = IofCompleteRequest as *const () as usize;
-    *iat.add(4) = IoCreateDevice as *const () as usize;
-    *iat.add(5) = KeBugCheckEx as *const () as usize;
-    *iat.add(6) = IoDeleteSymbolicLink as *const () as usize;
-    kprintln!("[LOADER] IAT imports bound for null.sys (7 exports resolved to purentoskrnl)");
+    let Some(imports) = bind_kernel_imports(NULL_SYS_IMAGE, driver_base, kernel) else {
+        kprintln!("[LOADER] Failed to bind null.sys imports");
+        return false;
+    };
+    kprintln!("[LOADER] null.sys: bound {} imports from kernel PE exports", imports);
 
     NULL_DRIVER_OBJECT.driver_start = driver_base as *mut _;
     NULL_DRIVER_OBJECT.driver_size = image_size as u32;
@@ -220,36 +254,18 @@ pub unsafe fn load_null_driver() -> bool {
     }
 }
 
-pub unsafe fn load_fs_rec_driver() -> bool {
+pub unsafe fn load_fs_rec_driver(kernel: &PeView<'_>) -> bool {
     let driver_base = &raw mut FS_REC_DRIVER_POOL as usize;
     let (image_size, entry_rva) = match map_pe_driver(FS_REC_SYS_IMAGE, driver_base, "fs_rec.sys") {
         Some(v) => v,
         None => return false,
     };
 
-    // Bind IAT for fs_rec.sys (RVA 0x2000, 20 exports, confirmed via IDA Pro 9.2)
-    let iat = (driver_base + 0x2000) as *mut usize;
-    *iat.add(0) = ExAllocatePoolWithTag as *const () as usize;
-    *iat.add(1) = IoBuildDeviceIoControlRequest as *const () as usize;
-    *iat.add(2) = IoUnregisterFileSystem as *const () as usize;
-    *iat.add(3) = ExFreePoolWithTag as *const () as usize;
-    *iat.add(4) = KeLeaveCriticalRegion as *const () as usize;
-    *iat.add(5) = IoBuildSynchronousFsdRequest as *const () as usize;
-    *iat.add(6) = IoRegisterFileSystem as *const () as usize;
-    *iat.add(7) = RtlInitUnicodeString as *const () as usize;
-    *iat.add(8) = KeSetEvent as *const () as usize;
-    *iat.add(9) = KeInitializeEvent as *const () as usize;
-    *iat.add(10) = MmPageEntireDriver as *const () as usize;
-    *iat.add(11) = KeEnterCriticalRegion as *const () as usize;
-    *iat.add(12) = ZwCreateFile as *const () as usize;
-    *iat.add(13) = ZwClose as *const () as usize;
-    *iat.add(14) = IofCompleteRequest as *const () as usize;
-    *iat.add(15) = KeWaitForSingleObject as *const () as usize;
-    *iat.add(16) = IoCreateDevice as *const () as usize;
-    *iat.add(17) = ZwLoadDriver as *const () as usize;
-    *iat.add(18) = IofCallDriver as *const () as usize;
-    *iat.add(19) = KeBugCheckEx as *const () as usize;
-    kprintln!("[LOADER] IAT imports bound for fs_rec.sys (20 exports resolved to purentoskrnl)");
+    let Some(imports) = bind_kernel_imports(FS_REC_SYS_IMAGE, driver_base, kernel) else {
+        kprintln!("[LOADER] Failed to bind fs_rec.sys imports");
+        return false;
+    };
+    kprintln!("[LOADER] fs_rec.sys: bound {} imports from kernel PE exports", imports);
 
     FS_REC_DRIVER_OBJECT.driver_start = driver_base as *mut _;
     FS_REC_DRIVER_OBJECT.driver_size = image_size as u32;

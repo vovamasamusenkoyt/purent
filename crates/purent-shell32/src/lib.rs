@@ -27,8 +27,8 @@ static ABOUT: DialogText = DialogText::new(
     "About PureNT",
     [
         "PureNT",
-        "NT compatibility: 6.1 (Build 7601)",
-        "Opened by winver.exe",
+        "Version 0.1",
+        "Windows NT 6.1 compatibility (Build 7601)",
     ],
     "OK",
 );

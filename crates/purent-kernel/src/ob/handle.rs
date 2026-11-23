@@ -3,7 +3,7 @@
 use purent_hal::kprintln;
 use purent_ntdef::{
     object::AccessMask,
-    status::{NtStatus, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS},
+    status::{NtStatus, STATUS_INVALID_HANDLE, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS},
 };
 
 use super::namespace::{
@@ -15,6 +15,7 @@ use super::namespace::{
 pub struct HandleEntry {
     pub object: *mut ObjectHeader,
     pub granted_access: AccessMask,
+    active_file_io: usize,
 }
 
 pub struct HandleTable {
@@ -29,6 +30,7 @@ pub static SYSTEM_HANDLE_TABLE: purent_hal::SpinLock<HandleTable> = purent_hal::
     entries: [HandleEntry {
         object: core::ptr::null_mut(),
         granted_access: 0,
+        active_file_io: 0,
     }; 128],
 });
 
@@ -59,26 +61,54 @@ pub unsafe fn ob_insert_file(file_ptr: *mut u8, name: &str) -> *mut ObjectHeader
     header
 }
 
-pub unsafe fn ob_close_handle(handle: usize) -> NtStatus {
+pub unsafe fn ob_remove_handle(handle: usize) -> Result<*mut ObjectHeader, NtStatus> {
     let handle_idx = handle / 4;
-    let mut tbl = SYSTEM_HANDLE_TABLE.lock();
-    if handle_idx == 0 || handle_idx >= tbl.entries.len() {
-        return purent_ntdef::status::STATUS_INVALID_HANDLE;
+    let header = {
+        let mut table = SYSTEM_HANDLE_TABLE.lock();
+        let entry = table.entries.get_mut(handle_idx).ok_or(STATUS_INVALID_HANDLE)?;
+        let header = entry.object;
+        if header.is_null() {
+            return Err(STATUS_INVALID_HANDLE);
+        }
+        entry.object = core::ptr::null_mut();
+        entry.granted_access = 0;
+        if (*header).handle_count > 0 {
+            (*header).handle_count -= 1;
+        }
+        if (*header).pointer_count > 0 {
+            (*header).pointer_count -= 1;
+        }
+        header
+    };
+    // The removed slot cannot accept new file requests. Its existing users
+    // keep the body alive until their synchronous dispatches return.
+    while SYSTEM_HANDLE_TABLE.lock().entries[handle_idx].active_file_io != 0 {
+        purent_hal::cpu::halt();
     }
-    let entry = &mut tbl.entries[handle_idx];
-    if entry.object.is_null() {
-        return purent_ntdef::status::STATUS_INVALID_HANDLE;
+    Ok(header)
+}
+
+pub struct FileIoReference {
+    slot: usize,
+    pub file: *mut purent_ntdef::io::FileObject,
+}
+
+impl Drop for FileIoReference {
+    fn drop(&mut self) {
+        SYSTEM_HANDLE_TABLE.lock().entries[self.slot].active_file_io -= 1;
     }
-    let header = entry.object;
-    if (*header).handle_count > 0 {
-        (*header).handle_count -= 1;
+}
+
+pub unsafe fn ob_reference_file_for_io(handle: usize) -> Result<FileIoReference, NtStatus> {
+    let slot = handle / 4;
+    let mut table = SYSTEM_HANDLE_TABLE.lock();
+    let entry = table.entries.get_mut(slot).ok_or(STATUS_INVALID_HANDLE)?;
+    let header = entry.object.as_ref().ok_or(STATUS_INVALID_HANDLE)?;
+    if header.object_type != &raw mut OB_TYPE_FILE || header.body.is_null() {
+        return Err(STATUS_INVALID_HANDLE);
     }
-    if (*header).pointer_count > 0 {
-        (*header).pointer_count -= 1;
-    }
-    entry.object = core::ptr::null_mut();
-    entry.granted_access = 0;
-    STATUS_SUCCESS
+    entry.active_file_io += 1;
+    Ok(FileIoReference { slot, file: header.body.cast() })
 }
 
 pub unsafe fn ob_create_handle(object_header: *mut ObjectHeader, access: AccessMask) -> usize {
