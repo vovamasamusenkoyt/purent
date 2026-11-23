@@ -1,0 +1,12 @@
+[package]
+name = "purent-ntdll"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ntdll"
+crate-type = ["cdylib"]
+
+[dependencies]
+purent-ntdef = { path = "../purent-ntdef" }
+purent-pe = { path = "../purent-pe" }

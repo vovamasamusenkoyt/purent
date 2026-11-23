@@ -148,3 +148,14 @@ pub unsafe extern "win64" fn RtlNtStatusToDosError(status: NtStatus) -> u32 {
         1 // ERROR_INVALID_FUNCTION
     }
 }
+
+
+#[no_mangle]
+pub unsafe extern "win64" fn NtClose(handle: usize) -> NtStatus {
+    purent_ntdef::syscall::nt_syscall1(0x0C, handle as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn _wcsicmp(s1: *const u16, s2: *const u16) -> i32 {
+    purent_ntdef::string::compare_ascii_wide_insensitive(s1, s2)
+}

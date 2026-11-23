@@ -48,6 +48,19 @@ pub extern "win64" fn ki_system_call_dispatch(frame: &mut TrapFrame) {
         return;
     }
 
+    if matches!(syscall_nr, purent_ntdef::syscall::SYSCALL_PURENT_MAP_DLL | purent_ntdef::syscall::SYSCALL_PURENT_SEAL_IMAGE) {
+        use purent_ntdef::syscall::SYSCALL_PURENT_MAP_DLL;
+        let status = match crate::ps::current_process_id() {
+            Some(win32k::CONSOLE_CLIENT_PID | crate::WINVER_PID) if syscall_nr == SYSCALL_PURENT_MAP_DLL => {
+                unsafe { crate::ps::ps_map_win32_module(a1 as usize) }
+            }
+            Some(win32k::CONSOLE_CLIENT_PID | crate::WINVER_PID) => unsafe { crate::ps::ps_seal_win32_image(a1) },
+            _ => purent_ntdef::status::STATUS_ACCESS_DENIED,
+        };
+        frame.rax = status as u64;
+        return;
+    }
+
     let status: NtStatus = match syscall_nr {
         SYSCALL_PURENT_COMPOSE_RECEIVE => win32k::compositor::receive(),
         SYSCALL_PURENT_COMPOSE_FINISH => win32k::compositor::finish(),

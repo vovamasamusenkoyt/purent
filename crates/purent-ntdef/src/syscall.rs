@@ -11,6 +11,11 @@ pub const SYSCALL_PURENT_CONSOLE_SUBMIT: u64 = 0x8003;
 pub const SYSCALL_PURENT_CONSOLE_OUTPUT: u64 = 0x8004;
 pub const SYSCALL_PURENT_COMPOSE_RECEIVE: u64 = 0x8005;
 pub const SYSCALL_PURENT_COMPOSE_FINISH: u64 = 0x8006;
+/// Map or seal a catalog image. The kernel accepts catalog indices only.
+pub const SYSCALL_PURENT_MAP_DLL: u64 = 0x8007;
+pub const SYSCALL_PURENT_SEAL_IMAGE: u64 = 0x8008;
+pub const CURRENT_EXECUTABLE_IMAGE: u64 = u64::MAX;
+
 /// Packed console output uses the low 24 bits for bytes and the next byte for length.
 pub const CONSOLE_OUTPUT_LENGTH_SHIFT: u32 = 24;
 pub const CONSOLE_LINE_CAPACITY: usize = 1024;

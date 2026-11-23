@@ -37,6 +37,19 @@ pub struct PebLdrData {
     pub shutdown_thread_id: *mut core::ffi::c_void,           // 0x50
 }
 
+/// Initial portion of the Windows 7 x64 loader module entry.
+#[repr(C)]
+pub struct LdrDataTableEntry {
+    pub in_load_order_links: ListEntry,
+    pub in_memory_order_links: ListEntry,
+    pub in_initialization_order_links: ListEntry,
+    pub dll_base: *mut core::ffi::c_void,
+    pub entry_point: *mut core::ffi::c_void,
+    pub size_of_image: u32,
+    pub full_dll_name: UnicodeString,
+    pub base_dll_name: UnicodeString,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct RtlUserProcessParameters {

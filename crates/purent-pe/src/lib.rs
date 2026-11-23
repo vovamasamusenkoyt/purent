@@ -139,6 +139,11 @@ pub enum PeError {
     InvalidSection,
 }
 
+pub enum NamedExport<'a> {
+    Address(u32),
+    Forwarder(&'a str),
+}
+
 pub struct PeView<'a> {
     data: &'a [u8],
     nt_headers_offset: usize,
@@ -217,6 +222,46 @@ impl<'a> PeView<'a> {
         } else {
             None
         }
+    }
+
+    /// Resolve a named export in either a PE file or a mapped image.
+    pub fn named_export(&self, name: &[u8], mapped: bool) -> Option<NamedExport<'a>> {
+        let directory = *self.data_directory(IMAGE_DIRECTORY_ENTRY_EXPORT)?;
+        if directory.virtual_address == 0 || directory.size < 40 {
+            return None;
+        }
+        let offset = |rva| if mapped { Some(rva as usize) } else { self.rva_to_offset(rva) };
+        let base = offset(directory.virtual_address)?;
+        let u32_at = |at| Some(u32::from_le_bytes(self.data.get(at..at + 4)?.try_into().ok()?));
+        let count = u32_at(base + 24)? as usize;
+        let names = offset(u32_at(base + 32)?)?;
+        let ordinals = offset(u32_at(base + 36)?)?;
+        let addresses = offset(u32_at(base + 28)?)?;
+        let dir_end = directory.virtual_address.checked_add(directory.size)?;
+        for index in 0..count {
+            let exported = self.data.get(offset(u32_at(names + index * 4)?)?..)?;
+            let end = exported.iter().position(|&byte| byte == 0)?;
+            if &exported[..end] != name {
+                continue;
+            }
+            let ordinal_offset = ordinals + index * 2;
+            let ordinal = u16::from_le_bytes(self.data.get(ordinal_offset..ordinal_offset + 2)?.try_into().ok()?) as usize;
+            if ordinal >= u32_at(base + 20)? as usize {
+                return None;
+            }
+            let rva = u32_at(addresses + ordinal * 4)?;
+            if rva == 0 || rva >= self.size_of_image() {
+                return None;
+            }
+            if rva >= directory.virtual_address && rva < dir_end {
+                let at = offset(rva)?;
+                let bytes = self.data.get(at..at + (dir_end - rva) as usize)?;
+                let end = bytes.iter().position(|&byte| byte == 0)?;
+                return core::str::from_utf8(&bytes[..end]).ok().map(NamedExport::Forwarder);
+            }
+            return Some(NamedExport::Address(rva));
+        }
+        None
     }
 
     pub fn rva_to_offset(&self, rva: u32) -> Option<usize> {

@@ -1,0 +1,11 @@
+[package]
+name = "purent-winbrand"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "winbrand"
+crate-type = ["cdylib"]
+
+[dependencies]
+purent-ntdef = { path = "../purent-ntdef" }

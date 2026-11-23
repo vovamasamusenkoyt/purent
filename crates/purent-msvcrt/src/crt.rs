@@ -15,7 +15,6 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
 
 #[path = "../../purent-ntdef/src/freestanding.rs"]
 mod freestanding;
-pub use freestanding::*;
 
 #[no_mangle]
 pub static mut _fmode: i32 = 0;
@@ -123,8 +122,7 @@ pub unsafe extern "C" fn longjmp() -> ! {
 #[no_mangle]
 pub unsafe extern "C" fn _local_unwind() {}
 
-#[no_mangle]
-#[allow(non_snake_case)]
+#[export_name = "?terminate@@YAXXZ"]
 pub unsafe extern "C" fn _ZNSt9terminateEv() {}
 
 #[no_mangle]
@@ -293,17 +291,7 @@ pub unsafe extern "C" fn wcsncmp(s1: *const u16, s2: *const u16, n: usize) -> i3
 
 #[no_mangle]
 pub unsafe extern "C" fn _wcsicmp(s1: *const u16, s2: *const u16) -> i32 {
-    let mut i = 0;
-    loop {
-        let mut c1 = *s1.add(i);
-        let mut c2 = *s2.add(i);
-        if c1 >= 'A' as u16 && c1 <= 'Z' as u16 { c1 += 32; }
-        if c2 >= 'A' as u16 && c2 <= 'Z' as u16 { c2 += 32; }
-        if c1 != c2 || c1 == 0 {
-            return (c1 as i32) - (c2 as i32);
-        }
-        i += 1;
-    }
+    purent_ntdef::string::compare_ascii_wide_insensitive(s1, s2)
 }
 
 #[no_mangle]

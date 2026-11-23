@@ -41,8 +41,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "purent-kernel32"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]
+
+[[package]]
+name = "purent-kernelbase"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]
+
+[[package]]
+name = "purent-msvcrt"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]
+
+[[package]]
 name = "purent-ntdef"
 version = "0.1.0"
+
+[[package]]
+name = "purent-ntdll"
+version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+ "purent-pe",
+]
 
 [[package]]
 name = "purent-pe"
@@ -67,7 +96,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "purent-win32"
+name = "purent-winbrand"
 version = "0.1.0"
 dependencies = [
  "purent-ntdef",
@@ -83,3 +112,6 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "purent-ntdef",
+]

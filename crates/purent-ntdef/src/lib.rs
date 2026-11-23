@@ -23,3 +23,5 @@ pub use ps::*;
 pub use status::*;
 pub use string::*;
 pub use syscall::*;
+
+pub mod win32_modules;

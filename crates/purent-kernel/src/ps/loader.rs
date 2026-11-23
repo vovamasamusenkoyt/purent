@@ -5,15 +5,10 @@ use purent_hal::kprintln;
 use purent_ntdef::kpcr::ThreadState;
 use purent_ntdef::ps::{Peb, RtlUserProcessParameters, Teb};
 use purent_ntdef::status::{NtStatus, STATUS_NO_MEMORY, STATUS_UNSUCCESSFUL};
-use purent_pe::{ImageImportDescriptor, PeView, IMAGE_DIRECTORY_ENTRY_IMPORT};
+use purent_pe::PeView;
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct Win32ExportEntry {
-    pub dll: [u8; 16],
-    pub func: [u8; 64],
-    pub addr: *const (),
-}
+use purent_ntdef::win32_modules::BUILTIN_MODULES;
+use purent_pe::NamedExport;
 
 use crate::ke::arch::ki_user_thread_start_trampoline;
 use crate::ke::sched::{
@@ -315,165 +310,63 @@ pub unsafe fn ps_map_user_shared_data() -> Result<(), NtStatus> {
 }
 
 const WIN32_MODULES: &[(&str, &[u8])] = &[
+    ("kernel32.dll", include_bytes!("../../../../target/esp/kernel32.dll")),
+    ("kernelbase.dll", include_bytes!("../../../../target/esp/kernelbase.dll")),
+    ("ntdll.dll", include_bytes!("../../../../target/esp/ntdll.dll")),
+    ("msvcrt.dll", include_bytes!("../../../../target/esp/msvcrt.dll")),
+    ("winbrand.dll", include_bytes!("../../../../target/esp/winbrand.dll")),
     ("user32.dll", include_bytes!("../../../../target/esp/user32.dll")),
     ("shell32.dll", include_bytes!("../../../../target/esp/shell32.dll")),
 ];
 
-unsafe fn map_win32_dll(cr3: u64, bytes: &[u8], pe: &PeView<'_>) -> Result<(), NtStatus> {
-    let base = pe.image_base() as usize;
-    let optional_header = &pe.nt_headers().optional_header;
-    let win32_hdr_pages = (optional_header.size_of_headers as usize + 4095) / 4096;
-    for i in 0..win32_hdr_pages {
-        let va = (base + i * 4096) as u64;
-        let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-        core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
-        vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
-    }
-    if (optional_header.size_of_headers as usize) <= bytes.len() {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, optional_header.size_of_headers as usize);
+unsafe fn map_win32_image(cr3: u64, bytes: &[u8], pe: &PeView<'_>) -> Result<(), NtStatus> {
+    let base = pe.image_base();
+    let image_size = pe.size_of_image() as usize;
+    let headers = pe.nt_headers().optional_header.size_of_headers as usize;
+    let header_bytes = bytes.get(..headers).filter(|_| headers <= image_size).ok_or(STATUS_UNSUCCESSFUL)?;
+    for section in pe.section_headers() {
+        let rva = section.virtual_address as usize;
+        let size = section.virtual_size.max(section.size_of_raw_data) as usize;
+        let raw = section.pointer_to_raw_data as usize;
+        if rva + size > image_size || raw + section.size_of_raw_data as usize > bytes.len() {
+            return Err(STATUS_UNSUCCESSFUL);
+        }
     }
 
-    for sec in pe.section_headers() {
-        let raw_offset = sec.pointer_to_raw_data as usize;
-        let raw_size = sec.size_of_raw_data as usize;
-        let virt_addr = sec.virtual_address as usize;
-        let virt_size = sec.virtual_size as usize;
-        let sec_va = base + virt_addr;
-
-        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
-        let sec_pages = page_aligned_size / 4096;
-        for j in 0..sec_pages {
-            let va = (sec_va + j * 4096) as u64;
+    for offset in (0..image_size).step_by(4096) {
+        let result = (|| {
             let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
             core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
-            vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
+            if let Err(status) = vmm_map_user_page(cr3, base + offset as u64, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_NX) {
+                PMM.lock().free_frame(frame);
+                return Err(status);
+            }
+            Ok(())
+        })();
+        if let Err(status) = result {
+            for prior in (0..offset).step_by(4096) {
+                if let Some(frame) = crate::mm::vmm_unmap_user_page(cr3, base + prior as u64) {
+                    PMM.lock().free_frame(frame);
+                }
+            }
+            return Err(status);
         }
+    }
 
-        let dst = sec_va as *mut u8;
-        if raw_size > 0 && raw_offset + raw_size <= bytes.len() {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr().add(raw_offset), dst, raw_size);
-        }
-        if virt_size < page_aligned_size {
-            core::ptr::write_bytes(dst.add(virt_size), 0, page_aligned_size - virt_size);
-        }
-
+    core::ptr::copy_nonoverlapping(header_bytes.as_ptr(), base as *mut u8, headers);
+    for section in pe.section_headers() {
+        let raw = section.pointer_to_raw_data as usize;
+        let size = section.size_of_raw_data as usize;
+        core::ptr::copy_nonoverlapping(bytes.as_ptr().add(raw), (base + section.virtual_address as u64) as *mut u8, size);
     }
     Ok(())
 }
 
-fn resolve_pe_export(bytes: &[u8], name: &str) -> Option<u64> {
-    let pe = PeView::parse(bytes).ok()?;
-    let directory = pe.data_directory(purent_pe::IMAGE_DIRECTORY_ENTRY_EXPORT)?;
-    if directory.virtual_address == 0 || directory.size < 40 {
-        return None;
-    }
-    let dir = pe.rva_to_offset(directory.virtual_address)?;
-    let read_u32 = |offset| Some(u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?));
-    let count = read_u32(dir + 24)? as usize;
-    let names = pe.rva_to_offset(read_u32(dir + 32)?)?;
-    let ordinals = pe.rva_to_offset(read_u32(dir + 36)?)?;
-    let addresses = pe.rva_to_offset(read_u32(dir + 28)?)?;
-
-    for index in 0..count {
-        let name_offset = pe.rva_to_offset(read_u32(names + index * 4)?)?;
-        let export_name = bytes.get(name_offset..)?.split(|&byte| byte == 0).next()?;
-        if export_name != name.as_bytes() {
-            continue;
-        }
-        let ordinal_offset = ordinals + index * 2;
-        let ordinal = u16::from_le_bytes(bytes.get(ordinal_offset..ordinal_offset + 2)?.try_into().ok()?) as usize;
-        if ordinal >= read_u32(dir + 20)? as usize {
-            return None;
-        }
-        let rva = read_u32(addresses + ordinal * 4)?;
-        let directory_end = directory.virtual_address.checked_add(directory.size)?;
-        if rva == 0 || rva >= pe.size_of_image() || (directory.virtual_address..directory_end).contains(&rva) {
-            return None;
-        }
-        return pe.image_base().checked_add(rva as u64);
-    }
-    None
-}
-
-unsafe fn bind_win32_imports(pe: &PeView<'_>, win32_exports: &[Win32ExportEntry]) -> usize {
-    let base = pe.image_base() as usize;
-    let mut bound_count = 0;
-    if let Some(imp_dir) = pe.data_directory(IMAGE_DIRECTORY_ENTRY_IMPORT) {
-        if imp_dir.virtual_address != 0 && imp_dir.size != 0 {
-            let mut desc_offset = base + imp_dir.virtual_address as usize;
-            loop {
-                let desc = &*(desc_offset as *const ImageImportDescriptor);
-                if desc.name == 0 && desc.first_thunk == 0 {
-                    break;
-                }
-
-                let dll_name_ptr = (base + desc.name as usize) as *const u8;
-                let mut dll_len = 0;
-                while *dll_name_ptr.add(dll_len) != 0 {
-                    dll_len += 1;
-                }
-                let dll_name = core::str::from_utf8(core::slice::from_raw_parts(dll_name_ptr, dll_len)).unwrap_or("");
-
-                let thunk_rva = if desc.original_first_thunk != 0 {
-                    desc.original_first_thunk as usize
-                } else {
-                    desc.first_thunk as usize
-                };
-                let iat_rva = desc.first_thunk as usize;
-
-                let mut slot = 0;
-                loop {
-                    let thunk_val = *((base + thunk_rva + slot * 8) as *const u64);
-                    if thunk_val == 0 {
-                        break;
-                    }
-
-                    if thunk_val & 0x8000_0000_0000_0000 == 0 {
-                        let hint_name_rva = (thunk_val & 0xFFFF_FFFF) as usize;
-                        let name_ptr = (base + hint_name_rva + 2) as *const u8;
-                        let mut f_len = 0;
-                        while *name_ptr.add(f_len) != 0 {
-                            f_len += 1;
-                        }
-                        let func_name = core::str::from_utf8(core::slice::from_raw_parts(name_ptr, f_len)).unwrap_or("");
-
-                        let module_export = WIN32_MODULES.iter()
-                            .find(|(module, _)| module.eq_ignore_ascii_case(dll_name))
-                            .and_then(|(module, bytes)| {
-                                let address = resolve_pe_export(bytes, func_name)?;
-                                kprintln!("[PS] Bound {}!{} at 0x{:016X}", module, func_name, address);
-                                Some(address)
-                            });
-                        let resolved = module_export.or_else(|| {
-                            win32_exports.iter().find_map(|entry| {
-                                let e_dll = core::str::from_utf8(&entry.dll).ok()?.trim_end_matches('\0');
-                                let e_func = core::str::from_utf8(&entry.func).ok()?.trim_end_matches('\0');
-                                (e_dll.eq_ignore_ascii_case(dll_name) && e_func == func_name)
-                                    .then_some(entry.addr as u64)
-                            })
-                        }).unwrap_or(0);
-
-                        if resolved != 0 {
-                            let iat_slot_ptr = (base + iat_rva + slot * 8) as *mut u64;
-                            *iat_slot_ptr = resolved;
-                            bound_count += 1;
-                        } else {
-                            kprintln!("[PS] Warning: Unresolved import {}!{}", dll_name, func_name);
-                        }
-                    }
-                    slot += 1;
-                }
-
-                desc_offset += core::mem::size_of::<ImageImportDescriptor>();
-            }
-        }
-    }
-    bound_count
-
-}
-
 unsafe fn protect_win32_image(cr3: u64, pe: &PeView<'_>) -> Result<(), NtStatus> {
     let base = pe.image_base() as usize;
+    for offset in (0..pe.nt_headers().optional_header.size_of_headers as usize).step_by(4096) {
+        vmm_protect_user_page(cr3, (base + offset) as u64, PTE_PRESENT | PTE_USER | PTE_NX)?;
+    }
     for sec in pe.section_headers() {
         let virt_addr = sec.virtual_address as usize;
         let virt_size = sec.virtual_size as usize;
@@ -500,115 +393,100 @@ unsafe fn protect_win32_image(cr3: u64, pe: &PeView<'_>) -> Result<(), NtStatus>
     Ok(())
 }
 
+static MAPPED_DLLS: purent_hal::SpinLock<usize> = purent_hal::SpinLock::new(0);
+
+fn catalog_image(index: usize) -> Option<(&'static str, &'static [u8], PeView<'static>)> {
+    let &(name, address) = BUILTIN_MODULES.get(index)?;
+    let &(_, bytes) = WIN32_MODULES.iter().find(|&&(registered, _)| name == registered)?;
+    let pe = PeView::parse(bytes).ok()?;
+    (pe.image_base() == address as u64).then_some((name, bytes, pe))
+}
+
+pub unsafe fn ps_map_win32_module(index: usize) -> NtStatus {
+    let Some((name, bytes, pe)) = catalog_image(index) else {
+        return purent_ntdef::status::STATUS_INVALID_PARAMETER;
+    };
+    let mut mapped = MAPPED_DLLS.lock();
+    let bit = 1usize << index;
+    if *mapped & bit != 0 {
+        return purent_ntdef::status::STATUS_SUCCESS;
+    }
+    match map_win32_image(purent_hal::cpu::read_cr3(), bytes, &pe) {
+        Ok(()) => {
+            *mapped |= bit;
+            let base = pe.image_base();
+            kprintln!("[PS] Mapped {} at 0x{:016X}", name, base);
+            purent_ntdef::status::STATUS_SUCCESS
+        }
+        Err(status) => status,
+    }
+}
+
+pub unsafe fn ps_seal_win32_image(image: u64) -> NtStatus {
+    use purent_ntdef::status::{STATUS_INVALID_PARAMETER, STATUS_SUCCESS};
+    let pe = if image == purent_ntdef::syscall::CURRENT_EXECUTABLE_IMAGE {
+        let bytes = match crate::ps::current_process_id() {
+            Some(crate::win32k::CONSOLE_CLIENT_PID) => crate::CMD_EXE_BYTES,
+            Some(crate::WINVER_PID) => crate::WINVER_EXE_BYTES,
+            _ => return STATUS_INVALID_PARAMETER,
+        };
+        PeView::parse(bytes).ok()
+    } else if let Some((_, _, pe)) = catalog_image(image as usize) {
+        if *MAPPED_DLLS.lock() & (1usize << image) == 0 {
+            return STATUS_INVALID_PARAMETER;
+        }
+        Some(pe)
+    } else {
+        None
+    };
+    let Some(pe) = pe else { return STATUS_INVALID_PARAMETER };
+    protect_win32_image(purent_hal::cpu::read_cr3(), &pe).map_or_else(|status| status, |()| STATUS_SUCCESS)
+}
+
+pub unsafe fn ps_load_ntdll() -> Result<usize, NtStatus> {
+    let index = BUILTIN_MODULES.iter().position(|&(name, _)| name == "ntdll.dll").ok_or(STATUS_UNSUCCESSFUL)?;
+    let status = ps_map_win32_module(index);
+    if status < 0 {
+        return Err(status);
+    }
+    let status = ps_seal_win32_image(index as u64);
+    if status < 0 {
+        return Err(status);
+    }
+    let (_, _, pe) = catalog_image(index).ok_or(STATUS_UNSUCCESSFUL)?;
+    match pe.named_export(b"PureNtLdrStart", false) {
+        Some(NamedExport::Address(rva)) => Ok(pe.image_base() as usize + rva as usize),
+        _ => Err(STATUS_UNSUCCESSFUL),
+    }
+}
+
 pub unsafe fn ps_create_win32_process(
-    cmd_pe_bytes: &[u8],
-    win32_pe_bytes: &[u8],
+    pe_bytes: &[u8],
     name: &'static str,
     pid: usize,
     environment_base: usize,
-    map_runtime: bool,
+    loader_entry: usize,
 ) -> Result<(*mut Process, *mut purent_ntdef::kpcr::KThread), NtStatus> {
-    kprintln!("\n[PS] Staging original Windows 7 x64 \"{}\" (PID: 0x{:X}) with PureNT Win32 subsystem...", name, pid);
-
+    kprintln!("[PS] Staging Win32 process {} (PID: 0x{:X})", name, pid);
     let cr3 = purent_hal::cpu::read_cr3();
 
-    // 1. Map purent-win32 runtime at 0x0000000070000000
-    let win32_pe = PeView::parse(win32_pe_bytes).map_err(|e| {
-        kprintln!("[PS] Failed to parse purent-win32 PE: {:?}", e);
+    // Map the executable before handing control to NTDLL.
+    let image = PeView::parse(pe_bytes).map_err(|e| {
+        kprintln!("[PS] Failed to parse {} PE: {:?}", name, e);
         STATUS_UNSUCCESSFUL
     })?;
-    let win32_base = win32_pe.image_base() as usize;
-
-    if map_runtime {
-        kprintln!("[PS] Mapping Win32 subsystem runtime at 0x{:016X}...", win32_base);
-        map_win32_dll(cr3, win32_pe_bytes, &win32_pe)?;
-        for (module, bytes) in WIN32_MODULES {
-            let pe = PeView::parse(bytes).map_err(|_| STATUS_UNSUCCESSFUL)?;
-            map_win32_dll(cr3, bytes, &pe)?;
-            let base = pe.image_base();
-            kprintln!("[PS] Mapped {} at 0x{:016X}", module, base);
-        }
-    }
-
-    // Locate .exports section in purent-win32
-    let mut exports_slice: Option<&[Win32ExportEntry]> = None;
-    for sec in win32_pe.section_headers() {
-        if sec.name.starts_with(b".exports") {
-            let num_entries = sec.virtual_size as usize / core::mem::size_of::<Win32ExportEntry>();
-            let exports_ptr = (win32_base + sec.virtual_address as usize) as *const Win32ExportEntry;
-            exports_slice = Some(core::slice::from_raw_parts(exports_ptr, num_entries));
-            break;
-        }
-    }
-    let win32_exports = exports_slice.ok_or(STATUS_UNSUCCESSFUL)?;
-    kprintln!("[PS] Win32 subsystem runtime active: {} functions exported", win32_exports.len());
-
-    if map_runtime {
-        for (module, bytes) in WIN32_MODULES {
-            let pe = PeView::parse(bytes).map_err(|_| STATUS_UNSUCCESSFUL)?;
-            bind_win32_imports(&pe, win32_exports);
-            protect_win32_image(cr3, &pe)?;
-            kprintln!("[PS] Ready: {}", module);
-        }
-        protect_win32_image(cr3, &win32_pe)?;
-    }
-
-    // 2. Map cmd.exe PE sections at 0x000000004AD00000
-    let cmd_pe = PeView::parse(cmd_pe_bytes).map_err(|e| {
-        kprintln!("[PS] Failed to parse cmd.exe PE: {:?}", e);
-        STATUS_UNSUCCESSFUL
-    })?;
-    let cmd_base = cmd_pe.image_base() as usize;
-    let cmd_entry = (cmd_base + cmd_pe.entry_point_rva() as usize) as u64;
+    let image_base = image.image_base() as usize;
+    let image_entry = (image_base + image.entry_point_rva() as usize) as u64;
 
     kprintln!(
-        "[PS] Mapping cmd.exe sections at ImageBase 0x{:016X}, EntryPoint 0x{:016X}...",
-        cmd_base,
-        cmd_entry
+        "[PS] Mapping {} at ImageBase 0x{:016X}, EntryPoint 0x{:016X}...",
+        name,
+        image_base,
+        image_entry
     );
 
-    let opt_hdr = &cmd_pe.nt_headers().optional_header;
-    let headers_size = opt_hdr.size_of_headers as usize;
-    let headers_pages = (headers_size + 4095) / 4096;
-    for i in 0..headers_pages {
-        let va = (cmd_base + i * 4096) as u64;
-        let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-        core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
-        vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
-    }
-    if headers_size <= cmd_pe_bytes.len() {
-        core::ptr::copy_nonoverlapping(cmd_pe_bytes.as_ptr(), cmd_base as *mut u8, headers_size);
-    }
-
-    for sec in cmd_pe.section_headers() {
-        let raw_offset = sec.pointer_to_raw_data as usize;
-        let raw_size = sec.size_of_raw_data as usize;
-        let virt_addr = sec.virtual_address as usize;
-        let virt_size = sec.virtual_size as usize;
-        let sec_va = cmd_base + virt_addr;
-
-        let page_aligned_size = (virt_size.max(raw_size) + 4095) & !4095;
-        let sec_pages = page_aligned_size / 4096;
-        for j in 0..sec_pages {
-            let va = (sec_va + j * 4096) as u64;
-            let frame = PMM.lock().allocate_frame().ok_or(STATUS_NO_MEMORY)?;
-            core::ptr::write_bytes(phys_to_virt::<u8>(frame), 0, 4096);
-            vmm_map_user_page(cr3, va, frame, PTE_PRESENT | PTE_USER | PTE_WRITABLE)?;
-        }
-
-        let dst = sec_va as *mut u8;
-        if raw_size > 0 && raw_offset + raw_size <= cmd_pe_bytes.len() {
-            core::ptr::copy_nonoverlapping(cmd_pe_bytes.as_ptr().add(raw_offset), dst, raw_size);
-        }
-        if virt_size < page_aligned_size {
-            core::ptr::write_bytes(dst.add(virt_size), 0, page_aligned_size - virt_size);
-        }
-    }
-
-    let bound_count = bind_win32_imports(&cmd_pe, win32_exports);
-    kprintln!("[PS] Bound {} IAT import entries for {}", bound_count, name);
-
-    protect_win32_image(cr3, &cmd_pe)?;
+    let opt_hdr = &image.nt_headers().optional_header;
+    map_win32_image(cr3, pe_bytes, &image)?;
 
     // 4. Initialize Process Environment Block (PEB) at 0x0000000000550000
     let peb_addr = environment_base;
@@ -619,7 +497,7 @@ pub unsafe fn ps_create_win32_process(
 
     (*peb).inherited_address_space = 0;
     (*peb).being_debugged = 0;
-    (*peb).image_base_address = cmd_base as *mut core::ffi::c_void;
+    (*peb).image_base_address = image_base as *mut core::ffi::c_void;
     (*peb).number_of_processors = 1;
     (*peb).nt_global_flag = 0;
     (*peb).os_major_version = 6;      // Windows 7
@@ -710,7 +588,7 @@ pub unsafe fn ps_create_win32_process(
 
     (*proc_ptr).pcb.directory_table_base = purent_hal::cpu::read_cr3();
     (*proc_ptr).unique_process_id = pid;
-    (*proc_ptr).section_base_address = cmd_base;
+    (*proc_ptr).section_base_address = image_base;
     (*proc_ptr).peb = peb;
     let name_bytes = name.as_bytes();
     let copy_len = if name_bytes.len() > 15 { 15 } else { name_bytes.len() };
@@ -752,7 +630,7 @@ pub unsafe fn ps_create_win32_process(
     kthread.kernel_stack = frame_base as *mut core::ffi::c_void;
 
     let rbx_slot = (frame_base + 0x100) as *mut usize;
-    *rbx_slot = cmd_entry as usize; // RBX = entry_point (RIP)
+    *rbx_slot = loader_entry; // NTDLL binds the executable before entering its code.
 
     let rdi_slot = (frame_base + 0x108) as *mut usize;
     *rdi_slot = user_stack_top;      // RDI = user_stack_top (RSP)
@@ -776,7 +654,7 @@ pub unsafe fn ps_create_win32_process(
         name,
         pid,
         tid,
-        cmd_entry
+        image_entry
     );
 
     Ok((proc_ptr, kthread as *mut _))

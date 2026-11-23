@@ -6,6 +6,16 @@ use purent_ntdef::syscall::{
     nt_syscall6, nt_syscall7, SYSCALL_PURENT_CONSOLE_INPUT,
 };
 
+#[link(name = "ntdll", kind = "raw-dylib")]
+extern "C" {
+    fn _wcsicmp(s1: *const u16, s2: *const u16) -> i32;
+}
+
+#[link(name = "api-ms-win-core-libraryloader-l1-1-0", kind = "raw-dylib")]
+extern "system" {
+    fn LoadLibraryExW(name: *const u16, file: usize, flags: u32) -> usize;
+}
+
 pub static mut LAST_ERROR: u32 = 0;
 
 // Standard Handle Constants
@@ -590,11 +600,6 @@ pub unsafe extern "win64" fn SetUnhandledExceptionFilter(_filter: usize) -> usiz
 pub unsafe extern "win64" fn UnhandledExceptionFilter(_info: usize) -> i32 { 1 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn GetModuleHandleW(_module_name: *const u16) -> usize {
-    (*(nt_current_peb_address() as *const purent_ntdef::ps::Peb)).image_base_address as usize
-}
-
-#[no_mangle]
 pub unsafe extern "win64" fn GetModuleFileNameW(
     _module: usize,
     filename: *mut u16,
@@ -624,27 +629,9 @@ pub unsafe extern "win64" fn CopyFileExW(_from: *const u16, _to: *const u16, _pr
 pub unsafe extern "win64" fn SetThreadUILanguage(_lang: u16) -> u16 { 0x0409 }
 
 #[no_mangle]
-pub unsafe extern "win64" fn GetProcAddress(_module: usize, proc_name: *const u8) -> usize {
-    if !proc_name.is_null() {
-        let mut len = 0;
-        while *proc_name.add(len) != 0 { len += 1; }
-        let name = core::str::from_utf8(core::slice::from_raw_parts(proc_name, len)).unwrap_or("");
-        if name == "CopyFileExW" { return CopyFileExW as *const () as usize; }
-        if name == "IsDebuggerPresent" { return IsDebuggerPresent as *const () as usize; }
-        if name == "SetConsoleInputExeNameW" { return SetConsoleInputExeNameW as *const () as usize; }
-        if name == "SetThreadUILanguage" { return SetThreadUILanguage as *const () as usize; }
-        if let Some(addr) = crate::resolve_win32_symbol("kernel32.dll", name) {
-            return addr;
-        }
-        if let Some(addr) = crate::resolve_win32_symbol("ntdll.dll", name) {
-            return addr;
-        }
-    }
-    0
+pub unsafe extern "win64" fn LoadLibraryW(lib_name: *const u16) -> usize {
+    LoadLibraryExW(lib_name, 0, 0)
 }
-
-#[no_mangle]
-pub unsafe extern "win64" fn LoadLibraryW(_lib_name: *const u16) -> usize { 0 }
 
 #[no_mangle]
 pub unsafe extern "win64" fn LoadLibraryExA(_lib_name: *const u8, _file: usize, _flags: u32) -> usize { 0 }
@@ -897,7 +884,7 @@ pub unsafe extern "win64" fn lstrcmpW(s1: *const u16, s2: *const u16) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "win64" fn lstrcmpiW(s1: *const u16, s2: *const u16) -> i32 {
-    crate::crt::_wcsicmp(s1, s2)
+    _wcsicmp(s1, s2)
 }
 
 #[no_mangle]

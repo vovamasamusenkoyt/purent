@@ -1,0 +1,11 @@
+[package]
+name = "purent-kernelbase"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kernelbase"
+crate-type = ["cdylib"]
+
+[dependencies]
+purent-ntdef = { path = "../purent-ntdef" }

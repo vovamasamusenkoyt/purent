@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod dwm;
+use purent_ntdef::win32_modules::{BUILTIN_MODULES, LIBRARY_LOADER_API_SET};
 
 fn project_root() -> PathBuf {
     Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into()))
@@ -71,45 +72,36 @@ fn build() {
             .expect("Failed to stage desktop process");
     }
 
-    println!("==> [PureNT xtask] 2. Building purent-win32 subsystem runtime (purent_win32.dll)...");
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .env(
-            "RUSTFLAGS",
-            "-C linker=lld-link -C link-arg=/entry:DllMain -C link-arg=/subsystem:native -C link-arg=/base:0x0000000070000000 -C link-arg=/nodefaultlib",
-        )
-        .args([
-            "build",
-            "--package",
-            "purent-win32",
-            "--target",
-            "x86_64-pc-windows-msvc",
-        ])
-        .status()
-        .expect("Failed to build purent-win32");
-    assert!(status.success(), "purent-win32 build failed");
-
-    let win32_binary = root.join("target/x86_64-pc-windows-msvc/debug/purent_win32.dll");
-    let dest_win32 = esp_dir.join("purent_win32.dll");
-    fs::copy(&win32_binary, &dest_win32).expect("Failed to copy purent_win32.dll");
-
-    for (name, export, base) in [
-        ("user32", "LoadStringW", "0x71000000"),
-        ("shell32", "ShellAboutW", "0x72000000"),
-    ] {
-        let flags = format!(
-            "-C linker=lld-link -C link-arg=/entry:DllMain -C link-arg=/subsystem:native -C link-arg=/nodefaultlib -C link-arg=/base:{base} -C link-arg=/export:{export}"
+    println!("==> [PureNT xtask] 2. Building Win32 modules...");
+    for &(file, base) in BUILTIN_MODULES {
+        let name = file.strip_suffix(".dll").unwrap();
+        let mut flags = format!(
+            "-C linker=lld-link -C link-arg=/entry:DllMain -C link-arg=/subsystem:native -C link-arg=/nodefaultlib -C link-arg=/base:{base:#x}"
         );
+        if name == "kernel32" {
+            for symbol in ["RtlCaptureContext", "RtlLookupFunctionEntry", "RtlVirtualUnwind"] {
+                flags.push_str(&format!(" -C link-arg=/export:{symbol}=ntdll.{symbol}"));
+            }
+            let contract = LIBRARY_LOADER_API_SET.strip_suffix(".dll").unwrap();
+            for symbol in ["GetModuleHandleW", "GetProcAddress"] {
+                flags.push_str(&format!(" -C link-arg=/export:{symbol}={contract}.{symbol}"));
+            }
+        }
         let status = Command::new("cargo")
             .current_dir(&root)
             .env("RUSTFLAGS", flags)
             .args(["build", "--package", &format!("purent-{name}"), "--target", "x86_64-pc-windows-msvc"])
             .status()
             .expect("Failed to build Win32 module");
-        assert!(status.success(), "{name}.dll build failed");
-        let file = format!("{name}.dll");
-        fs::copy(root.join("target/x86_64-pc-windows-msvc/debug").join(&file), esp_dir.join(file))
+        assert!(status.success(), "{file} build failed");
+        fs::copy(root.join("target/x86_64-pc-windows-msvc/debug").join(file), esp_dir.join(file))
             .expect("Failed to stage Win32 module");
+    }
+
+    match fs::remove_file(esp_dir.join("purent_win32.dll")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("Failed to remove obsolete staged runtime: {error}"),
     }
 
     let cmd_binary = root.join("refs/win7_7601_x64/binaries/cmd.exe");

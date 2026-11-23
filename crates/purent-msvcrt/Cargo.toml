@@ -1,10 +1,11 @@
 [package]
-name = "purent-win32"
+name = "purent-msvcrt"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+name = "msvcrt"
+crate-type = ["cdylib"]
 
 [dependencies]
 purent-ntdef = { path = "../purent-ntdef" }
